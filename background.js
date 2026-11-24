@@ -740,13 +740,17 @@ async function ensureOffscreen() {
 function buildFilename(meta, extension, folderMode) {
   const lesson = safeName(meta.title || 'lesson');
   const course = safeName(meta.courseTitle || meta.courseSlug || '');
+  const section = safeName(meta.section || '');
   const order = meta.order ? String(meta.order).padStart(2, '0') + ' - ' : '';
   const suffix = meta.suffix ? '.' + safeName(meta.suffix) : '';
-  const base = course && course.toLowerCase() !== lesson.toLowerCase()
-    ? course + ' - ' + lesson
-    : lesson;
-  const subfolder = folderMode === 'course' && course ? course + '/' : '';
-  return subfolder + order + base + suffix + '.' + extension;
+
+  const folders = [];
+  if (folderMode !== 'flat') {
+    if (course) folders.push(course);
+    if (section) folders.push(section);
+  }
+  const name = order + lesson + suffix + '.' + extension;
+  return folders.length ? folders.join('/') + '/' + name : name;
 }
 
 async function getBatch() {
@@ -772,7 +776,8 @@ async function goToBatchLesson(batch, tabId) {
   const lesson = batch.lessons[batch.index];
   if (!lesson) return;
   notify(tabId, null,
-    'Batch ' + (batch.index + 1) + '/' + batch.lessons.length + ': ' + lesson.title,
+    'Batch ' + (batch.index + 1) + '/' + batch.lessons.length + ': ' +
+      (lesson.section ? lesson.section + ' — ' : '') + lesson.title,
     'working');
   try {
     await chrome.tabs.update(tabId, { url: lesson.url });

@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.3.0
+- Filenames no longer include the course name: they are now `NN - <Lesson>.<ext>` (and `NN - <Lesson>.<language>.srt` for subtitles).
+- Course sidebar sections are detected and used as subfolders; numbering restarts at `01` in each section.
+- Falls back to one course folder with continuous numbering when no section headings are exposed.
+- Chapter quizzes and assessments are skipped when collecting lessons.
+- Renamed the save-structure option to **Course / section folders**.
+
 ## v2.2.0
 - Added subtitle downloads as `.srt`, with **Video** and **Subtitles** checkboxes in the lesson panel and toolbar popup.
 - English is selected by default; any additional languages exposed by the player or HLS playlist appear as checkboxes.

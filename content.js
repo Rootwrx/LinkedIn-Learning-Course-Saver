@@ -195,12 +195,78 @@
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  function safeDecode(value) {
+    try { return decodeURIComponent(value || ''); } catch (_) { return String(value || ''); }
+  }
+
+  function isNonVideoLesson(slug, label) {
+    const raw = safeDecode(slug).toLowerCase();
+    const text = (raw + ' ' + String(label || '')).toLowerCase();
+    return /(^|[^a-z])(quiz|quizzes|assessment|knowledge[ -]?check|exam)([^a-z]|$)/.test(text) ||
+      /(^|[-_])(quiz|assessment|knowledge-check|exam)([-_]|$)/.test(raw);
+  }
+
+  function cleanSectionText(element) {
+    return String(element.textContent || element.getAttribute('aria-label') || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+  }
+
+  function isSectionHeader(element, courseSlug) {
+    if (!element || element === document.body || element === document.documentElement) return false;
+
+    const explicitHeading = /^H[1-6]$/.test(element.tagName) ||
+      element.getAttribute('role') === 'heading' ||
+      element.hasAttribute('aria-expanded');
+    if (!explicitHeading) {
+      const hint = String(element.className || '') + ' ' +
+        String(element.getAttribute('data-test') || '') + ' ' +
+        String(element.getAttribute('data-test-id') || '');
+      if (!/(section|module|chapter|courseitemgroup)/i.test(hint)) return false;
+    }
+
+    const text = cleanSectionText(element);
+    if (!text || text.length > 80) return false;
+    if (/^(course content|table of contents|contents?|lessons?|videos?)$/i.test(text)) return false;
+
+    const lessonRe = new RegExp('^https?://www\\.linkedin\\.com/learning/' +
+      escapeRegExp(courseSlug) + '/[^/?#]+/?$', 'i');
+    for (const anchor of element.querySelectorAll('a[href]')) {
+      if (lessonRe.test(anchor.href)) return false;
+    }
+    return true;
+  }
+
+  function sectionForAnchor(anchor, courseSlug) {
+    let node = anchor;
+    for (let depth = 0; depth < 8 && node; depth++) {
+      let sibling = node.previousElementSibling;
+      while (sibling) {
+        if (isSectionHeader(sibling, courseSlug)) return cleanSectionText(sibling);
+
+        const nested = sibling.querySelectorAll(
+          'h2,h3,h4,h5,h6,[role="heading"],button[aria-expanded],' +
+          '[class*="section" i],[class*="module" i],[class*="chapter" i],' +
+          '[data-test*="section" i],[data-test*="module" i]'
+        );
+        for (let i = nested.length - 1; i >= 0; i--) {
+          if (isSectionHeader(nested[i], courseSlug)) return cleanSectionText(nested[i]);
+        }
+        sibling = sibling.previousElementSibling;
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+
   function collectLessons() {
     if (!current) return [];
     const slug = escapeRegExp(current.courseSlug);
-    const re = new RegExp('^https?://www\\.linkedin\\.com/learning/' + slug + '/([^/?#]+)', 'i');
+    const re = new RegExp('^https?://www\\.linkedin\\.com/learning/' + slug + '/([^/?#]+)/?$', 'i');
     const seen = new Set();
     const out = [];
+    const counters = new Map();
 
     document.querySelectorAll('a[href]').forEach((anchor) => {
       const href = anchor.href;
@@ -210,27 +276,58 @@
       let clean;
       try {
         const url = new URL(href);
-        clean = url.origin + url.pathname;
+        clean = url.origin + url.pathname.replace(/\/+$/, '');
       } catch (_) {
-        clean = String(href).split(/[?#]/)[0];
+        clean = String(href).split(/[?#]/)[0].replace(/\/+$/, '');
       }
       if (seen.has(clean)) return;
-      seen.add(clean);
 
+      const lessonSlug = safeDecode(match[1]);
       const label = (anchor.textContent || anchor.getAttribute('aria-label') || anchor.title || '')
         .trim().replace(/\s+/g, ' ');
+      if (isNonVideoLesson(lessonSlug, label)) return;
+      seen.add(clean);
+
+      const section = sectionForAnchor(anchor, current.courseSlug);
+      const key = section || '__unsectioned__';
+      const order = (counters.get(key) || 0) + 1;
+      counters.set(key, order);
       out.push({
         url: clean,
-        title: label.slice(0, 110) || decodeURIComponent(match[1]).replace(/-/g, ' '),
-        slug: decodeURIComponent(match[1]),
+        title: label.slice(0, 110) || lessonSlug.replace(/-/g, ' '),
+        slug: lessonSlug,
+        section: section,
+        order: order,
       });
     });
 
-    const currentUrl = location.origin + location.pathname;
-    if (!seen.has(currentUrl)) {
-      out.unshift({ url: currentUrl, title: current.title, slug: current.videoSlug });
+    const currentUrl = location.origin + location.pathname.replace(/\/+$/, '');
+    if (!seen.has(currentUrl) && !isNonVideoLesson(current.videoSlug, current.title)) {
+      out.unshift({
+        url: currentUrl,
+        title: current.title,
+        slug: current.videoSlug,
+        section: current.section || '',
+        order: current.order || 1,
+      });
     }
     return out;
+  }
+
+  function annotateCurrent() {
+    if (!current) return;
+    const mine = collectLessons().find((lesson) => {
+      try {
+        return new URL(lesson.url).pathname.replace(/\/+$/, '') ===
+          location.pathname.replace(/\/+$/, '');
+      } catch (_) {
+        return false;
+      }
+    });
+    if (mine) {
+      current.section = mine.section;
+      current.order = mine.order;
+    }
   }
 
   function updateCourseInfo() {
@@ -238,8 +335,13 @@
       courseEl.textContent = '';
       return;
     }
-    const count = collectLessons().length;
-    courseEl.textContent = 'Course playlist: ' + count + ' lesson' + (count === 1 ? '' : 's') + ' found.';
+    const lessons = collectLessons();
+    const sections = new Set(lessons.map((lesson) => lesson.section).filter(Boolean));
+    const noun = lessons.length === 1 ? 'video' : 'videos';
+    const sectionText = sections.size
+      ? ' in ' + sections.size + ' section' + (sections.size === 1 ? '' : 's')
+      : '';
+    courseEl.textContent = 'Course playlist: ' + lessons.length + ' ' + noun + sectionText + '.';
   }
 
   const LANG_LABELS = {
@@ -389,7 +491,8 @@
       requestId: requestId,
       batch: true,
       batchIndex: batch.index,
-      order: batch.index + 1,
+      section: lesson.section || (current && current.section) || '',
+      order: lesson.order || batch.index + 1,
       title: lesson.title || (current && current.title) || 'lesson',
       courseTitle: batch.courseTitle || (current && current.courseTitle) || '',
       courseSlug: batch.courseSlug || (current && current.courseSlug) || '',
@@ -514,6 +617,8 @@
       videoSlug: decodeURIComponent(match[2]),
       title: title,
       courseTitle: courseTitle || match[1].replace(/-/g, ' '),
+      section: '',
+      order: null,
     };
   }
 
@@ -523,6 +628,7 @@
     captures = [];
     current = readPage();
     pageIdentity = extractIdentity();
+    annotateCurrent();
 
     try {
       chrome.runtime.sendMessage({ type: 'lls:page', url: location.href }, () => {
@@ -606,6 +712,8 @@
         courseTitle: current.courseTitle,
         courseSlug: current.courseSlug,
         videoSlug: current.videoSlug,
+        section: current.section || '',
+        order: current.order || '',
         resolution: Number(qualityEl.value) || 0,
         identity: pageIdentity,
       }, options), (resp) => {

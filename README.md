@@ -13,9 +13,11 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 - Downloads the playlist's parts in the background and assembles one local video file.
 - Downloads the selected subtitle tracks as `.srt` files next to the video: from the player's caption asset, HLS `#EXT-X-MEDIA:TYPE=SUBTITLES` metadata, or LinkedIn's transcript API as a fallback.
 - Checkboxes let you save **Video**, **Subtitles**, or both. **English** is selected by default; other languages appear when LinkedIn exposes them for the lesson.
-- Names the file `<Course> - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) and subtitles `<Course> - <Lesson>.<language>.srt` into a per-course folder by default.
+- Names the file `NN - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) and subtitles `NN - <Lesson>.<language>.srt`. The course name is **not** in the filename — it is the top-level folder.
+- When LinkedIn exposes course sections, each section becomes its own subfolder and numbering restarts at `01` inside it.
+- Skips chapter quizzes / assessments — only playable video lessons are collected.
 - Works on single-page navigations — the button follows the current lesson without a reload.
-- **Batch mode:** **Save whole course** walks every lesson link in the current course playlist, auto-plays each lesson muted to capture its stream, saves the selected files in order, then returns to the lesson you started from.
+- **Batch mode:** **Save whole course** walks every video lesson link in the current course playlist, auto-plays each lesson muted to capture its stream, saves the selected files in section order, then returns to the lesson you started from.
 
 No signup, credits, accounts, or external servers. Everything runs locally in your browser.
 
@@ -47,19 +49,21 @@ If you edit the code later, come back here and click the **reload** icon on the 
 3. Click **Save lesson** in the bottom-right. The panel shows what was detected, for example `Stream detected (720p): 2 playlists ready.`
 4. Under **Download**, keep **Video** and/or **Subtitles** checked. English is checked by default; check any additional languages LinkedIn lists for that lesson.
 5. Choose a preferred quality (only used when a master playlist is available), then click **Save stream**.
-6. Watch the status line for progress. Files land in your Downloads folder (or a subfolder named after the course).
+6. Watch the status line for progress. Files land in `Downloads/<Course>/<Section>/` (or flat in `Downloads` if you chose that).
 
 > Timing matters: signed `dms.licdn.com` URLs expire. Click **Save stream** soon after the video starts. If you waited a long time, reload the lesson page and start the video again.
 
 ### Batch download a whole course
 
 1. Open any lesson in the course.
-2. Click **Save lesson** → check the `Course playlist: N lessons found` line.
+2. Click **Save lesson** → check the `Course playlist: N videos in M sections` line.
 3. Click **Save whole course**. The tab will walk the lessons automatically.
 4. Use **Stop batch** at any time to cancel and return to the original lesson.
 5. When it finishes, the status shows `Batch complete: X saved, Y failed` and the tab returns to where you started.
 
-Batch files are prefixed in playlist order (`01 - …`, `02 - …`) so they stay sorted in the course folder. Subtitle-only batches wait briefly for the player to expose a caption track before saving.
+Batch files are prefixed in playlist order (`01 - …`, `02 - …`) so they stay sorted. With sections, the layout is `Downloads/<Course>/<Section>/01 - <Lesson>.ts`, and the next section starts again at `01`. Quizzes are omitted. Subtitle-only batches wait briefly for the player to expose a caption track before saving.
+
+If LinkedIn does not render section headings in the sidebar, the extension falls back to one course folder with continuous numbering.
 
 The popup (toolbar icon) holds the preferred quality, default download choices, and save-structure setting.
 
@@ -67,7 +71,7 @@ The popup (toolbar icon) holds the preferred quality, default download choices, 
 
 - **Download by default** – Video and Subtitles (English). These are pre-checked on lesson pages too.
 - **Preferred quality** – highest available, or 720p / 540p / 360p when the master playlist lists variants.
-- **Save structure** – one folder per course, or everything flat in `Downloads`.
+- **Save structure** – course/section folders, or everything flat in `Downloads`.
 
 ## Troubleshooting
 
@@ -83,7 +87,8 @@ The popup (toolbar icon) holds the preferred quality, default download choices, 
 | Downloaded `.ts` won't play in Windows Media Player | Open it with VLC or mpv, or remux it locally to `.mp4` with ffmpeg. |
 | Saved file has no audio | Some HLS streams split audio into a separate track. This version saves only the video variant. |
 | Download starts but stops | Reload the lesson page to get fresh signed URLs, then retry. |
-| Batch says `0 lessons found` | Scroll the course sidebar so LinkedIn renders its lesson links, then reopen the panel. |
+| Batch says `0 videos found` | Scroll the course sidebar so LinkedIn renders its lesson links, then reopen the panel. |
+| A quiz was saved / counted | Reload the lesson page; quizzes and assessments are skipped by title and URL. |
 | Batch reports a failed lesson | The player did not expose a stream within 45 seconds for that lesson. Reload it and save it individually, then retry the batch. |
 
 ## Files
