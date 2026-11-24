@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.4.0
+- Fixed batch lesson collection: links with query strings and trailing slashes are recognized again instead of reporting only the current video.
+- Section folders now come from LinkedIn's embedded course outline first; sidebar headings remain a fallback. The `Introduction` section is detected from the course's TOC data.
+- Added an explicit **Subtitle format** choice: SubRip (`.srt`, default) or WebVTT (`.vtt`). Subtitle files are no longer written with a plain-text MIME/extension.
+- Subtitle downloads use the proper `application/x-subrip` or `text/vtt` MIME type so browsers do not append `.txt`.
+
 ## v2.3.0
 - Filenames no longer include the course name: they are now `NN - <Lesson>.<ext>` (and `NN - <Lesson>.<language>.srt` for subtitles).
 - Course sidebar sections are detected and used as subfolders; numbering restarts at `01` in each section.

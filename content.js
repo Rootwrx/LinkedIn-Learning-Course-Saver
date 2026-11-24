@@ -109,6 +109,11 @@
     <option value="540">540p</option>
     <option value="360">360p</option>
   </select>
+  <label for="sf">Subtitle format</label>
+  <select id="sf">
+    <option value="srt">SubRip (.srt)</option>
+    <option value="vtt">WebVTT (.vtt)</option>
+  </select>
   <button class="dl">Save stream</button>
   <button class="batch">Save whole course</button>
   <button class="stop" hidden>Stop batch</button>
@@ -126,6 +131,7 @@
   const subsOpt = root.querySelector('.opt-subs');
   const langsEl = root.querySelector('.langs');
   const qualityEl = root.querySelector('#q');
+  const formatEl = root.querySelector('#sf');
   const dlBtn = root.querySelector('.dl');
   const batchBtn = root.querySelector('.batch');
   const stopBtn = root.querySelector('.stop');
@@ -199,17 +205,27 @@
     try { return decodeURIComponent(value || ''); } catch (_) { return String(value || ''); }
   }
 
+  function cleanText(value) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  }
+
+  function normalizeSlug(value) {
+    return safeDecode(value).toLowerCase()
+      .replace(/-+\d+$/, '')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
   function isNonVideoLesson(slug, label) {
     const raw = safeDecode(slug).toLowerCase();
     const text = (raw + ' ' + String(label || '')).toLowerCase();
     return /(^|[^a-z])(quiz|quizzes|assessment|knowledge[ -]?check|exam)([^a-z]|$)/.test(text) ||
-      /(^|[-_])(quiz|assessment|knowledge-check|exam)([-_]|$)/.test(raw);
+      /(^|[-_])(quiz|assessment|knowledge-check|exam)([-_]|$)/.test(raw) ||
+      /learningApiAssessment:/i.test(String(slug || ''));
   }
 
   function cleanSectionText(element) {
-    return String(element.textContent || element.getAttribute('aria-label') || '')
-      .replace(/\s+/g, ' ')
-      .trim()
+    return cleanText(element && (element.textContent || element.getAttribute('aria-label')))
       .slice(0, 80);
   }
 
@@ -230,10 +246,15 @@
     if (!text || text.length > 80) return false;
     if (/^(course content|table of contents|contents?|lessons?|videos?)$/i.test(text)) return false;
 
-    const lessonRe = new RegExp('^https?://www\\.linkedin\\.com/learning/' +
-      escapeRegExp(courseSlug) + '/[^/?#]+/?$', 'i');
+    // LinkedIn lesson anchors usually carry query strings, so match the
+    // pathname prefix instead of requiring the URL to end at the slug.
+    const lessonRe = new RegExp('^/learning/' + escapeRegExp(courseSlug) + '/[^/]+', 'i');
     for (const anchor of element.querySelectorAll('a[href]')) {
-      if (lessonRe.test(anchor.href)) return false;
+      try {
+        if (lessonRe.test(new URL(anchor.href, location.href).pathname)) return false;
+      } catch (_) {
+        if (lessonRe.test(String(anchor.getAttribute('href') || ''))) return false;
+      }
     }
     return true;
   }
@@ -260,51 +281,288 @@
     return '';
   }
 
-  function collectLessons() {
+  function typeText(object) {
+    const recipes = Array.isArray(object.recipeTypes)
+      ? object.recipeTypes
+      : [object.recipeTypes];
+    return cleanText([object.type].concat(recipes).join(' ')).toLowerCase();
+  }
+
+  function urnsFrom(value) {
+    const out = [];
+    const seen = new Set();
+    function walk(node, depth) {
+      if (!node || depth > 5 || seen.has(node)) return;
+      seen.add(node);
+      if (Array.isArray(node)) {
+        node.forEach((item) => walk(item, depth + 1));
+        return;
+      }
+      if (typeof node === 'string') {
+        out.push(node);
+        return;
+      }
+      if (typeof node !== 'object') return;
+      for (const key of ['star_items', 'star_section', 'star_video', 'contents', 'content', 'video']) {
+        if (node[key] !== undefined) walk(node[key], depth + 1);
+      }
+    }
+    walk(value, 0);
+    return out;
+  }
+
+  function collectObjects(root) {
+    const out = [];
+    const seen = new Set();
+    function visit(node, depth) {
+      if (!node || typeof node !== 'object' || depth > 14 || seen.has(node)) return;
+      seen.add(node);
+      out.push(node);
+      if (out.length > 30000) return;
+      if (Array.isArray(node)) {
+        node.forEach((item) => visit(item, depth + 1));
+        return;
+      }
+      for (const key of Object.keys(node)) visit(node[key], depth + 1);
+    }
+    visit(root, 0);
+    return out;
+  }
+
+  function embeddedRoots() {
+    const roots = [];
+    const seen = new Set();
+    const nodes = document.querySelectorAll(
+      'code[id], script[type="application/json"], script[type="application/ld+json"]'
+    );
+    for (const node of nodes) {
+      const id = node.id || '';
+      const type = String(node.getAttribute('type') || '').toLowerCase();
+      if (id && !/^bpr-guid/i.test(id) && type !== 'application/json' &&
+          type !== 'application/ld+json') continue;
+      const raw = node.textContent || '';
+      if (raw.length < 40) continue;
+      const fingerprint = raw.slice(0, 240);
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
+      try {
+        roots.push(JSON.parse(raw));
+      } catch (_) {
+        /* LinkedIn embeds other non-JSON payloads too */
+      }
+      if (roots.length >= 16) break;
+    }
+    return roots;
+  }
+
+  function parseCourseRoot(root) {
+    const videos = new Map();
+    const sections = [];
+    const courses = [];
+    const sectionSeen = new Set();
+
+    for (const object of collectObjects(root)) {
+      const type = typeText(object);
+      const urn = cleanText(object.entityUrn || object.cachingKey || object.urn || '');
+      const videoId = (urn.match(/learningApiVideo:(\d+)/i) || [])[1] || '';
+
+      if (videoId && object.slug) {
+        videos.set(videoId, {
+          slug: safeDecode(object.slug),
+          title: cleanText(object.title || object.name || '').slice(0, 110),
+        });
+      }
+
+      if (/toc\.section/i.test(type) || /learningApiTocSection:/i.test(urn)) {
+        const sectionUrn = cleanText(object.cachingKey || object.entityUrn || urn);
+        if (sectionUrn && !sectionSeen.has(sectionUrn)) {
+          sectionSeen.add(sectionUrn);
+          sections.push({
+            urn: sectionUrn,
+            title: cleanText(object.title || '').slice(0, 80),
+            items: urnsFrom(object.star_items || object.contents || []),
+          });
+        }
+      }
+
+      if (/content\.course/i.test(type) || (/learningApiCourse:/i.test(urn) && object.slug)) {
+        courses.push({
+          urn: urn,
+          slug: safeDecode(object.slug),
+          title: cleanText(object.title || '').slice(0, 110),
+          sectionUrns: urnsFrom(object.contents || [])
+            .filter((item) => /learningApiTocSection:/i.test(item)),
+        });
+      }
+    }
+    return { videos: videos, sections: sections, courses: courses };
+  }
+
+  let courseDataCache = { key: '', entries: [], courseTitle: '' };
+
+  function courseDataForCurrent() {
+    if (!current) return { entries: [], courseTitle: '' };
+    const key = location.href + '|' + current.courseSlug + '|' + current.videoSlug;
+    if (courseDataCache.key === key) return courseDataCache;
+
+    const parsed = embeddedRoots().map(parseCourseRoot);
+    const wanted = normalizeSlug(current.courseSlug);
+    let chosen = null;
+
+    for (let i = 0; i < parsed.length && !chosen; i++) {
+      const data = parsed[i];
+      for (const course of data.courses) {
+        const candidate = normalizeSlug(course.slug);
+        if (candidate === wanted ||
+            (candidate && wanted.startsWith(candidate)) ||
+            (candidate.startsWith(wanted) && wanted.length > 3)) {
+          const sections = course.sectionUrns
+            .map((urn) => data.sections.find((section) => section.urn === urn))
+            .filter(Boolean);
+          if (sections.length) {
+            chosen = {
+              sections: sections,
+              videos: data.videos,
+              courseTitle: course.title,
+            };
+            break;
+          }
+        }
+      }
+    }
+
+    // Some pages only embed the current lesson's metadata. Pick the root that
+    // knows this video, then use every section it contains.
+    if (!chosen) {
+      const currentSlug = normalizeSlug(current.videoSlug);
+      for (const data of parsed) {
+        const knowsCurrent = Array.from(data.videos.values())
+          .some((video) => normalizeSlug(video.slug) === currentSlug);
+        if (knowsCurrent && data.sections.length) {
+          chosen = { sections: data.sections, videos: data.videos, courseTitle: '' };
+          break;
+        }
+      }
+    }
+
+    const entries = [];
+    if (chosen) {
+      const counters = new Map();
+      const seen = new Set();
+      for (const section of chosen.sections) {
+        const sectionTitle = cleanText(section.title).slice(0, 80);
+        const key = sectionTitle || '__unsectioned__';
+        for (const item of section.items) {
+          const videoId = (String(item).match(/learningApiVideo:(\d+)/i) || [])[1] || '';
+          const video = chosen.videos.get(videoId);
+          if (!video || !video.slug || seen.has(video.slug)) continue;
+          if (isNonVideoLesson(video.slug, video.title)) continue;
+          const order = (counters.get(key) || 0) + 1;
+          counters.set(key, order);
+          seen.add(video.slug);
+          entries.push({
+            slug: video.slug,
+            title: video.title || video.slug.replace(/-/g, ' '),
+            section: sectionTitle,
+            order: order,
+          });
+        }
+      }
+    }
+
+    courseDataCache = {
+      key: key,
+      entries: entries,
+      courseTitle: chosen ? chosen.courseTitle : '',
+    };
+    return courseDataCache;
+  }
+
+  function lessonUrl(courseSlug, lessonSlug) {
+    return location.origin + '/learning/' + encodeURIComponent(courseSlug) + '/' +
+      encodeURIComponent(lessonSlug);
+  }
+
+  function anchorLessons() {
     if (!current) return [];
-    const slug = escapeRegExp(current.courseSlug);
-    const re = new RegExp('^https?://www\\.linkedin\\.com/learning/' + slug + '/([^/?#]+)/?$', 'i');
+    const pathRe = new RegExp('^/learning/' + escapeRegExp(current.courseSlug) + '/([^/]+)', 'i');
     const seen = new Set();
     const out = [];
-    const counters = new Map();
 
     document.querySelectorAll('a[href]').forEach((anchor) => {
-      const href = anchor.href;
-      const match = href.match(re);
-      if (!match) return;
-
-      let clean;
+      let url;
+      let lessonSlug = '';
       try {
-        const url = new URL(href);
-        clean = url.origin + url.pathname.replace(/\/+$/, '');
+        url = new URL(anchor.href, location.href);
+        if (!/^www\.linkedin\.com$/i.test(url.hostname)) return;
+        const match = url.pathname.match(pathRe);
+        if (!match) return;
+        lessonSlug = safeDecode(match[1]);
       } catch (_) {
-        clean = String(href).split(/[?#]/)[0].replace(/\/+$/, '');
+        return;
       }
-      if (seen.has(clean)) return;
+      if (!lessonSlug || seen.has(lessonSlug)) return;
 
-      const lessonSlug = safeDecode(match[1]);
-      const label = (anchor.textContent || anchor.getAttribute('aria-label') || anchor.title || '')
-        .trim().replace(/\s+/g, ' ');
+      const label = cleanText(anchor.textContent || anchor.getAttribute('aria-label') ||
+        anchor.title || '').slice(0, 110);
       if (isNonVideoLesson(lessonSlug, label)) return;
-      seen.add(clean);
+      seen.add(lessonSlug);
 
-      const section = sectionForAnchor(anchor, current.courseSlug);
-      const key = section || '__unsectioned__';
+      out.push({
+        url: url.origin + url.pathname.replace(/\/+$/, ''),
+        title: label || lessonSlug.replace(/-/g, ' '),
+        slug: lessonSlug,
+        section: sectionForAnchor(anchor, current.courseSlug),
+        order: 0,
+      });
+    });
+    return out;
+  }
+
+  function collectLessons() {
+    if (!current) return [];
+    const embedded = courseDataForCurrent();
+    const anchors = anchorLessons();
+    const bySlug = new Map();
+    for (const lesson of anchors) {
+      if (!bySlug.has(lesson.slug)) bySlug.set(lesson.slug, lesson);
+    }
+
+    const out = [];
+    const used = new Set();
+
+    for (const entry of embedded.entries) {
+      const anchor = bySlug.get(entry.slug);
+      const isCurrent = entry.slug === current.videoSlug;
+      out.push({
+        url: anchor ? anchor.url : lessonUrl(current.courseSlug, entry.slug),
+        title: isCurrent ? current.title : (anchor && anchor.title ? anchor.title : entry.title),
+        slug: entry.slug,
+        section: entry.section,
+        order: entry.order,
+      });
+      used.add(entry.slug);
+    }
+
+    const counters = new Map();
+    for (const anchor of anchors) {
+      if (used.has(anchor.slug)) continue;
+      const key = anchor.section || '__unsectioned__';
       const order = (counters.get(key) || 0) + 1;
       counters.set(key, order);
       out.push({
-        url: clean,
-        title: label.slice(0, 110) || lessonSlug.replace(/-/g, ' '),
-        slug: lessonSlug,
-        section: section,
+        url: anchor.url,
+        title: anchor.title,
+        slug: anchor.slug,
+        section: anchor.section,
         order: order,
       });
-    });
+      used.add(anchor.slug);
+    }
 
-    const currentUrl = location.origin + location.pathname.replace(/\/+$/, '');
-    if (!seen.has(currentUrl) && !isNonVideoLesson(current.videoSlug, current.title)) {
+    if (!used.has(current.videoSlug) && !isNonVideoLesson(current.videoSlug, current.title)) {
       out.unshift({
-        url: currentUrl,
+        url: location.origin + location.pathname.replace(/\/+$/, ''),
         title: current.title,
         slug: current.videoSlug,
         section: current.section || '',
@@ -316,14 +574,9 @@
 
   function annotateCurrent() {
     if (!current) return;
-    const mine = collectLessons().find((lesson) => {
-      try {
-        return new URL(lesson.url).pathname.replace(/\/+$/, '') ===
-          location.pathname.replace(/\/+$/, '');
-      } catch (_) {
-        return false;
-      }
-    });
+    const data = courseDataForCurrent();
+    if (data.courseTitle) current.courseTitle = data.courseTitle;
+    const mine = collectLessons().find((lesson) => lesson.slug === current.videoSlug);
     if (mine) {
       current.section = mine.section;
       current.order = mine.order;
@@ -370,6 +623,7 @@
       downloadSubtitles: subsOpt.checked,
       subtitleLanguages: Array.from(langsEl.querySelectorAll('input:checked'))
         .map((input) => input.value),
+      subtitleFormat: formatEl.value === 'vtt' ? 'vtt' : 'srt',
     };
   }
 
@@ -397,6 +651,7 @@
       downloadVideo: options.downloadVideo,
       downloadSubtitles: options.downloadSubtitles,
       subtitleLanguages: options.subtitleLanguages,
+      subtitleFormat: options.subtitleFormat,
     });
   }
 
@@ -502,6 +757,7 @@
       downloadVideo: batch.downloadVideo !== false,
       downloadSubtitles: !!batch.downloadSubtitles,
       subtitleLanguages: (batch.subtitleLanguages || []).slice(),
+      subtitleFormat: batch.subtitleFormat || 'srt',
     }, (resp) => {
       activeRequestId = null;
       if (!resp || !resp.ok) {
@@ -666,10 +922,11 @@
   // Show English immediately, then let saved preferences replace it.
   renderLanguages(['en']);
   chrome.storage.sync.get([
-    'resolution', 'downloadVideo', 'downloadSubtitles', 'subtitleLanguages',
+    'resolution', 'downloadVideo', 'downloadSubtitles', 'subtitleLanguages', 'subtitleFormat',
   ], (s) => {
     const value = Number(s.resolution == null ? 0 : s.resolution);
     qualityEl.value = [0, 720, 540, 360].includes(value) ? String(value) : '0';
+    formatEl.value = s.subtitleFormat === 'vtt' ? 'vtt' : 'srt';
     videoOpt.checked = s.downloadVideo !== false;
     subsOpt.checked = s.downloadSubtitles !== false;
     availableLanguages = dedupeList(['en'].concat(s.subtitleLanguages || []));
@@ -678,6 +935,7 @@
   qualityEl.addEventListener('change', () => {
     chrome.storage.sync.set({ resolution: Number(qualityEl.value) });
   });
+  formatEl.addEventListener('change', savePrefs);
   videoOpt.addEventListener('change', savePrefs);
   subsOpt.addEventListener('change', savePrefs);
 
@@ -747,7 +1005,7 @@
 
     const lessons = collectLessons();
     if (!lessons.length) {
-      setStatus('No course lessons were found on this page.', 'error');
+      setStatus('No course videos were found on this page.', 'error');
       return;
     }
 
@@ -763,6 +1021,7 @@
       downloadVideo: videoOpt.checked,
       downloadSubtitles: subsOpt.checked,
       subtitleLanguages: downloadOptions().subtitleLanguages,
+      subtitleFormat: downloadOptions().subtitleFormat,
     }, (resp) => {
       batchBtn.disabled = false;
       if (!resp || !resp.ok) {

@@ -131,9 +131,10 @@ function getCaptureUrls(tabId) {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const prefs = await chrome.storage.sync.get(['resolution', 'folderMode']);
+  const prefs = await chrome.storage.sync.get(['resolution', 'folderMode', 'subtitleFormat']);
   if (prefs.resolution == null) await chrome.storage.sync.set({ resolution: 0 });
   if (!prefs.folderMode) await chrome.storage.sync.set({ folderMode: 'course' });
+  if (!prefs.subtitleFormat) await chrome.storage.sync.set({ subtitleFormat: 'srt' });
 });
 
 function safeName(value) {
@@ -575,15 +576,47 @@ function buildTranscriptSrt(lines) {
   return srt;
 }
 
-function normalizeSubtitleText(text) {
+function toSrt(text) {
   let out = String(text || '').replace(/^\uFEFF/, '').trim();
   if (/^WEBVTT/i.test(out)) {
-    out = out.replace(/^WEBVTT[^\n]*\n/i, '');
+    out = out.replace(/^WEBVTT[^\n]*(?:\n|$)/i, '');
+    // Normalize both sides of the arrow in one pass and drop VTT cue settings.
+    out = out.replace(
+      /^(\d{2}:\d{2}(?::\d{2})?)[.,](\d{3})\s*-->\s*(\d{2}:\d{2}(?::\d{2})?)[.,](\d{3})[^\n]*$/gm,
+      (_all, start, startMs, end, endMs) => {
+        const full = (value) => value.split(':').length === 2 ? '00:' + value : value;
+        return full(start) + ',' + startMs + ' --> ' + full(end) + ',' + endMs;
+      }
+    );
     out = out.replace(/(\d{2}:\d{2}:\d{2})\.(\d{3})/g, '$1,$2');
     out = out.replace(/(\d{2}:\d{2})\.(\d{3})/g, '00:$1,$2');
-    out = out.trim();
+    out = out.replace(/^\d+\s*\n/gm, '');
+    let cue = 1;
+    out = out.split(/\r?\n/).map((line) => {
+      if (/^\d{2}:\d{2}(?::\d{2})?,\d{3}\s*-->/.test(line)) {
+        return (cue++) + '\n' + line;
+      }
+      return line;
+    }).join('\n');
   }
-  return out ? out + '\n' : '';
+  return out.trim() ? out.trim() + '\n' : '';
+}
+
+function toVtt(text) {
+  let out = String(text || '').replace(/^\uFEFF/, '').trim();
+  if (!/^WEBVTT/i.test(out)) {
+    out = out.replace(/^\d+\s*\n/gm, '');
+    out = out.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    out = out.replace(/(\d{2}:\d{2}),(\d{3})/g, '00:$1.$2');
+    out = out.replace(/(-->\s*\d{2}:\d{2}(?::\d{2})?)[.,](\d{3})[^\n]*/g, '$1.$2');
+    out = out.replace(/\{[^\n]*\}/g, '');
+    out = 'WEBVTT\n\n' + out;
+  }
+  return out.trim() ? out.trim() + '\n' : '';
+}
+
+function normalizeSubtitleText(text, format) {
+  return format === 'vtt' ? toVtt(text) : toSrt(text);
 }
 
 async function fetchTranscriptSrt(courseSlug, videoSlug, identity) {
@@ -656,14 +689,14 @@ async function chooseSubtitleTracks(msg, requestId, tabId) {
   return out;
 }
 
-async function createTextBlobUrl(text, requestId, tabId) {
+async function createTextBlobUrl(text, requestId, tabId, mime) {
   await ensureOffscreen();
   const assembled = await chrome.runtime.sendMessage({
     type: 'lls:assemble',
     requestId: requestId,
     tabId: tabId,
     text: text,
-    mime: 'text/plain;charset=utf-8',
+    mime: mime || 'application/x-subrip;charset=utf-8',
   });
   if (!assembled || !assembled.ok) {
     throw new Error((assembled && assembled.error) || 'Could not create the subtitle file.');
@@ -672,13 +705,17 @@ async function createTextBlobUrl(text, requestId, tabId) {
 }
 
 async function downloadSubtitle(item, msg, folderMode, requestId, tabId) {
+  const format = msg.subtitleFormat === 'vtt' ? 'vtt' : 'srt';
   const filename = buildFilename(Object.assign({}, msg, {
     suffix: item.track.code,
-  }), 'srt', folderMode);
-  const text = normalizeSubtitleText(item.text);
+  }), format, folderMode);
+  const text = normalizeSubtitleText(item.text, format);
   if (!text) throw new Error('LinkedIn returned an empty ' + item.track.label + ' subtitle track.');
 
-  const assembled = await createTextBlobUrl(text, requestId, tabId);
+  const mime = format === 'vtt'
+    ? 'text/vtt;charset=utf-8'
+    : 'application/x-subrip;charset=utf-8';
+  const assembled = await createTextBlobUrl(text, requestId, tabId, mime);
   const downloadId = await chrome.downloads.download({
     url: assembled.blobUrl,
     filename: filename,
@@ -876,7 +913,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const lessons = (msg.lessons || []).filter((lesson) => lesson && lesson.url);
       if (tabId == null || !lessons.length) {
-        sendResponse({ ok: false, error: 'No course lessons were found on this page.' });
+        sendResponse({ ok: false, error: 'No course videos were found on this page.' });
         return;
       }
 
@@ -892,6 +929,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         downloadVideo: msg.downloadVideo !== false,
         downloadSubtitles: !!msg.downloadSubtitles,
         subtitleLanguages: (msg.subtitleLanguages || []).slice(),
+        subtitleFormat: msg.subtitleFormat === 'vtt' ? 'vtt' : 'srt',
         index: 0,
         lessons: lessons,
         results: [],

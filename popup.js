@@ -4,14 +4,17 @@ const quality = document.getElementById('q');
 const folder = document.getElementById('folder');
 const video = document.getElementById('video');
 const subs = document.getElementById('subs');
+const subtitleFormat = document.getElementById('subtitle-format');
 const status = document.getElementById('status');
 
 chrome.storage.sync.get([
   'resolution', 'folderMode', 'downloadVideo', 'downloadSubtitles', 'subtitleLanguages',
+  'subtitleFormat',
 ], (prefs) => {
   const value = Number(prefs.resolution == null ? 0 : prefs.resolution);
   quality.value = [0, 720, 540, 360].includes(value) ? String(value) : '0';
   folder.value = prefs.folderMode || 'course';
+  subtitleFormat.value = prefs.subtitleFormat === 'vtt' ? 'vtt' : 'srt';
   video.checked = prefs.downloadVideo !== false;
   subs.checked = prefs.downloadSubtitles !== false;
   if (!Array.isArray(prefs.subtitleLanguages) || !prefs.subtitleLanguages.length) {
@@ -39,3 +42,4 @@ subs.addEventListener('change', () => {
     });
   }
 });
+subtitleFormat.addEventListener('change', () => save('subtitleFormat', subtitleFormat.value));

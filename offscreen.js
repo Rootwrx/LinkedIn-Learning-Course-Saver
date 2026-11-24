@@ -9,7 +9,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (typeof msg.text === 'string') {
       try {
-        const blob = new Blob([msg.text], { type: msg.mime || 'text/plain' });
+        const blob = new Blob([msg.text], { type: msg.mime || 'application/x-subrip' });
         const blobUrl = URL.createObjectURL(blob);
         setTimeout(() => {
           try { URL.revokeObjectURL(blobUrl); } catch (_) { /* already gone */ }
