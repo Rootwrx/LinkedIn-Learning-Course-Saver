@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LinkedIn Learning Video Saver</title>
+  <style>
+    body { width: 290px; margin: 0; padding: 16px; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; color: #1d2226; }
+    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .logo { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; background: #0a66c2; color: #fff; font-weight: 700; font-size: 13px; }
+    h1 { margin: 0; font-size: 15px; }
+    .sub { margin: 2px 0 0; color: #6b7280; font-size: 11px; }
+    label { display: block; font-weight: 600; margin: 12px 0 5px; font-size: 12px; }
+    select { width: 100%; padding: 7px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; font-size: 12px; }
+    a { display: block; margin-top: 16px; padding: 9px; text-align: center; border-radius: 6px; background: #0a66c2; color: #fff; text-decoration: none; font-weight: 600; }
+    a:hover { background: #004182; }
+    .note { margin: 12px 0 0; color: #9ca3af; font-size: 10px; }
+    #status { margin: 10px 0 0; color: #047857; font-size: 11px; min-height: 14px; }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <div class="logo">LL</div>
+    <div>
+      <h1>Video Saver</h1>
+      <p class="sub">Saves the stream your player uses</p>
+    </div>
+  </div>
+
+  <label for="q">Preferred quality</label>
+  <select id="q">
+    <option value="0">Highest available</option>
+    <option value="720">720p</option>
+    <option value="540">540p</option>
+    <option value="360">360p</option>
+  </select>
+
+  <label for="folder">Save structure</label>
+  <select id="folder">
+    <option value="course">One folder per course</option>
+    <option value="flat">All files directly in Downloads</option>
+  </select>
+
+  <p id="status"></p>
+  <a href="https://www.linkedin.com/learning/" target="_blank" rel="noopener">Open LinkedIn Learning ↗</a>
+  <p class="note">Start the lesson video before saving. Streams are saved as .ts (or .mp4 when fragmented); play .ts files in VLC/mpv. Personal use only.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
