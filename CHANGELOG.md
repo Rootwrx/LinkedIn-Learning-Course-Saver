@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.5
+- Added `convert-all-to-mp4.ps1` / `convert-all-to-mp4.cmd`: a dynamic scanner that finds `.ts` files anywhere under Downloads (or a chosen folder) and remuxes them to `.mp4` with ffmpeg.
+- `-Watch` mode keeps running and converts each file shortly after Chrome finishes writing it, skipping downloads still in progress.
+- Chrome's `(1)`/`(2)` duplicates and files that already have an `.mp4` are skipped by default.
+
 ## v2.5.4
 - Fixed a major source of slow saves: when a progressive MP4 was used, the subtitle step still probed up to 10 HLS playlists sequentially. That redundant probe is now skipped.
 - Caption assets and HLS playlist candidates are now fetched in parallel instead of one at a time.

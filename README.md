@@ -46,6 +46,16 @@ The extension does **not** bundle ffmpeg, but if you have it installed you can r
 
 ffmpeg is detected from `PATH`; install it with `winget install yt-dlp.FFmpeg` if needed, or pass `-Ffmpeg "C:\path\to\ffmpeg.exe"`.
 
+For automatic discovery, use `convert-all-to-mp4.cmd` instead. It scans everything under your Downloads folder (or a folder you pass) and remuxes every `.ts` it finds:
+
+```cmd
+convert-all-to-mp4.cmd
+convert-all-to-mp4.cmd "C:\Users\hex0r\Downloads\My course" -DeleteOriginals
+convert-all-to-mp4.cmd "C:\Users\hex0r\Downloads" -Watch
+```
+
+`-Watch` keeps the script running and converts each `.ts` shortly after Chrome finishes writing it — useful if you start it before a batch download. Partial downloads are skipped until their file size is stable.
+
 ## Install (unpacked / developer mode)
 
 1. Open `chrome://extensions` (or `edge://extensions`).
