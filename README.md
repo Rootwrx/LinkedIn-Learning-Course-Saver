@@ -12,6 +12,7 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 - If a master playlist is available, picks the preferred quality (highest / 720p / 540p / 360p). If only a single media playlist was captured, it saves that one.
 - Downloads the playlist's parts in the background and assembles one local video file.
 - Downloads the selected subtitle tracks as `.srt` or `.vtt` files (your choice) next to the video: from the player's caption asset, HLS `#EXT-X-MEDIA:TYPE=SUBTITLES` metadata, or LinkedIn's transcript API as a fallback. Subtitles are never saved as `.txt`.
+- Detects caption language from the cue text, so a caption asset without a language hint cannot be saved under the wrong language. English falls back to LinkedIn's transcript when no English caption track is available.
 - Checkboxes let you save **Video**, **Subtitles**, or both. **English** is selected by default; other languages appear when LinkedIn exposes them for the lesson.
 - Names the file `NN - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) and subtitles `NN - <Lesson>.<language>.srt` (or `.vtt`). The course name is **not** in the filename — it is the top-level folder.
 - Section folders come from LinkedIn's embedded course outline when available; the visible sidebar headings are used as a fallback. Numbering restarts at `01` inside every section.
@@ -83,13 +84,14 @@ The popup (toolbar icon) holds the preferred quality, default download choices, 
 | "Could not open the captured playlist" | The player may use a different request mechanism. Reload the page while signed in, play for a few seconds, then retry. |
 | "This lesson stream is encrypted" | LinkedIn enabled HLS encryption for that asset; local saving is not supported. |
 | "byte-range segments" | This playlist style is not supported yet. Try another lesson or a future version. |
-| "No subtitle track was available" | Play the lesson with captions turned on, wait a few seconds, then retry. If LinkedIn exposes only a transcript, the extension builds a subtitle file from it in the selected format. |
+| "No subtitle track was available" | Play the lesson with captions turned on, wait a few seconds, then retry. If only a different-language caption asset is captured, it will not be saved as another language; the English transcript fallback is used when available. |
 | Button doesn't appear | Make sure the URL is `www.linkedin.com/learning/<course>/<lesson>` and that you're on the main frame, not an embedded preview. |
 | Downloaded `.ts` won't play in Windows Media Player | Open it with VLC or mpv, or remux it locally to `.mp4` with ffmpeg. |
 | Saved file has no audio | Some HLS streams split audio into a separate track. This version saves only the video variant. |
 | Download starts but stops | Reload the lesson page to get fresh signed URLs, then retry. |
 | Batch says `0 videos found` | Reload the lesson page and reopen the panel. LinkedIn's embedded outline is used first; sidebar links are a fallback. |
 | Only the current video is listed | Reload the lesson page so its embedded course data is available, then reopen the panel. Links with query strings are supported. |
+| Saved subtitles are in the wrong language | Reload the lesson page; caption language is now detected from the cue text. If no track in the selected language exists, English uses the transcript fallback rather than saving the wrong file. |
 | A quiz was saved / counted | Reload the lesson page; quizzes and assessments are skipped by title and outline type. |
 | Batch reports a failed lesson | The player did not expose a stream within 45 seconds for that lesson. Reload it and save it individually, then retry the batch. |
 

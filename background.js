@@ -619,6 +619,59 @@ function normalizeSubtitleText(text, format) {
   return format === 'vtt' ? toVtt(text) : toSrt(text);
 }
 
+function plainCaptionText(text) {
+  return String(text || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/^WEBVTT[^\n]*(?:\n|$)/i, ' ')
+    .replace(/\d{2}:\d{2}(?::\d{2})?[.,]\d{3}\s*-->\s*\d{2}:\d{2}(?::\d{2})?[.,]\d{3}[^\n]*/g, ' ')
+    .replace(/\{[^\}]*\}/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\[[^\]]+\]/g, ' ')
+    .replace(/[♪♫]/g, ' ')
+    .toLowerCase();
+}
+
+// LinkedIn's caption assets do not always carry a language code in the URL.
+// Detect the written language from the cue text so an English selection cannot
+// silently save a Vietnamese (or other) track that was labelled "en".
+function detectCaptionLanguage(text) {
+  const plain = plainCaptionText(text);
+  if (plain.length < 12) return '';
+
+  const count = (pattern) => (plain.match(pattern) || []).length;
+  if (count(/[\u3040-\u30ff]/g) > 2) return 'ja';
+  if (count(/[\uac00-\ud7af]/g) > 2) return 'ko';
+  if (count(/[\u4e00-\u9fff]/g) > 2) return 'zh';
+  if (count(/[\u0600-\u06ff]/g) > 2) return 'ar';
+  if (count(/[\u0590-\u05ff]/g) > 2) return 'he';
+  if (count(/[\u0900-\u097f]/g) > 2) return 'hi';
+  if (count(/[\u0e00-\u0e7f]/g) > 2) return 'th';
+
+  const total = plain.length;
+  const cyrillic = count(/[\u0400-\u04ff]/g);
+  if (cyrillic > 2 && cyrillic / total > 0.02) {
+    return /[іїєґ]/.test(plain) ? 'uk' : 'ru';
+  }
+  const greek = count(/[\u0370-\u03ff]/g);
+  if (greek > 2 && greek / total > 0.02) return 'el';
+
+  const vietnameseLetters = count(/[ăơưđ]/g);
+  const vietnameseTones = count(
+    /[àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ]/g
+  );
+  if (vietnameseLetters >= 1 && vietnameseTones >= 2) return 'vi';
+
+  const words = plain.split(/[^a-zà-ÿœ]+/).filter(Boolean);
+  const has = (...wanted) => wanted.some((word) => words.includes(word));
+  if (/[ñ¿¡]/.test(plain) || has('que', 'para', 'los', 'las', 'una', 'estar', 'está')) return 'es';
+  if (/[œç]/.test(plain) || has('les', 'des', 'une', 'dans', 'pour', 'être')) return 'fr';
+  if (/[ßäöü]/.test(plain) || has('der', 'die', 'das', 'und', 'ist', 'nicht')) return 'de';
+  if (/[ãõ]/.test(plain) || has('não', 'uma', 'para', 'com', 'este')) return 'pt';
+  if (has('gli', 'che', 'non', 'una', 'della', 'nell')) return 'it';
+
+  return '';
+}
+
 async function fetchTranscriptSrt(courseSlug, videoSlug, identity) {
   if (!courseSlug || !videoSlug) return '';
   const url = new URL('https://www.linkedin.com/learning-api/graphql');
@@ -646,15 +699,49 @@ async function fetchTranscriptSrt(courseSlug, videoSlug, identity) {
   }
 }
 
+async function inspectCaptionCandidates(msg) {
+  const candidates = dedupeSubtitleTracks(
+    (msg.subtitles || []).concat(msg.captionTracks || [])
+  );
+  for (const url of dedupe(msg.captions || [])) {
+    const info = languageFromUrl(url);
+    candidates.push({
+      code: info.code,
+      label: info.label,
+      url: url,
+      kind: 'captured',
+    });
+  }
+
+  const byCode = new Map();
+  for (const track of dedupeSubtitleTracks(candidates)) {
+    let text = '';
+    try {
+      text = await fetchText(track.url);
+    } catch (_) {
+      continue;
+    }
+    const code = detectCaptionLanguage(text) || track.code || 'en';
+    const label = LANGUAGE_NAMES[code] || track.label || code;
+    const existing = byCode.get(code);
+    if (!existing || (track.kind === 'hls' && existing.kind !== 'hls')) {
+      byCode.set(code, {
+        code: code,
+        label: label,
+        url: track.url,
+        kind: track.kind,
+        text: text,
+      });
+    }
+  }
+  return byCode;
+}
+
 async function chooseSubtitleTracks(msg, requestId, tabId) {
   const wanted = dedupe((msg.subtitleLanguages || []).map((code) => String(code).toLowerCase()));
   if (!wanted.length) return [];
 
-  const available = dedupeSubtitleTracks((msg.subtitles || []).concat(msg.captionTracks || []));
-  const byCode = new Map();
-  for (const track of available) {
-    if (!byCode.has(track.code)) byCode.set(track.code, track);
-  }
+  const byCode = await inspectCaptionCandidates(msg);
 
   let transcriptSrt = '';
   async function transcriptFallback() {
@@ -665,16 +752,19 @@ async function chooseSubtitleTracks(msg, requestId, tabId) {
 
   const out = [];
   for (const code of wanted) {
-    const track = byCode.get(code);
-    if (track) {
-      try {
-        notify(tabId, requestId, 'Fetching ' + track.label + ' subtitles…');
-        const text = await fetchText(track.url);
-        out.push({ track: track, text: text });
-        continue;
-      } catch (_) {
-        if (code !== 'en') continue;
-      }
+    const item = byCode.get(code);
+    if (item) {
+      notify(tabId, requestId, 'Fetching ' + item.label + ' subtitles…');
+      out.push({
+        track: {
+          code: item.code,
+          label: item.label,
+          url: item.url,
+          kind: item.kind,
+        },
+        text: item.text,
+      });
+      continue;
     }
     if (code === 'en') {
       const text = await transcriptFallback();
@@ -899,6 +989,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     notify(msg.tabId, msg.requestId, msg.message, msg.state);
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (msg.type === 'lls:inspectCaptions') {
+    (async () => {
+      const urls = tabId == null ? [] : getCaptureUrls(tabId).captions;
+      const byCode = await inspectCaptionCandidates({ captions: urls });
+      const tracks = Array.from(byCode.values()).map((item) => ({
+        code: item.code,
+        label: item.label,
+        url: item.url,
+        kind: item.kind,
+      }));
+      sendResponse({
+        ok: true,
+        captionTracks: tracks,
+        languages: dedupe(['en'].concat(tracks.map((track) => track.code))),
+      });
+    })();
+    return true;
   }
 
   if (msg.type === 'lls:getBatch') {

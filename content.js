@@ -146,26 +146,43 @@
   }
 
   function requestCaptures(callback) {
-    try {
-      chrome.runtime.sendMessage({ type: 'lls:getCaptures' }, (resp) => {
-        if (chrome.runtime.lastError) {
-          captures = [];
-        } else if (resp && resp.ok) {
-          captures = resp.items || [];
-          const languages = dedupeList(['en'].concat(resp.languages || []));
+    function finish() {
+      updateStreamStatus();
+      if (callback) callback();
+    }
+
+    function inspectLanguages() {
+      // Caption URLs often have no language code. Ask the worker to read the
+      // cue text so the language checkboxes reflect what LinkedIn actually
+      // captured instead of guessing everything is English.
+      sendRuntime({ type: 'lls:inspectCaptions' }, (inspected) => {
+        if (inspected && inspected.ok) {
+          const languages = dedupeList(['en'].concat(inspected.languages || []));
           if (languages.join('|') !== availableLanguages.join('|')) {
             const previous = downloadOptions().subtitleLanguages;
             availableLanguages = languages;
             renderLanguages(previous);
           }
         }
-        updateStreamStatus();
-        if (callback) callback();
+        finish();
+      });
+    }
+
+    try {
+      chrome.runtime.sendMessage({ type: 'lls:getCaptures' }, (resp) => {
+        if (chrome.runtime.lastError) {
+          captures = [];
+          finish();
+        } else if (resp && resp.ok) {
+          captures = resp.items || [];
+          inspectLanguages();
+        } else {
+          finish();
+        }
       });
     } catch (_) {
       captures = [];
-      updateStreamStatus();
-      if (callback) callback();
+      finish();
     }
   }
 

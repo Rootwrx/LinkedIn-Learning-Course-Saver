@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.4.1
+- Fixed a case where a Vietnamese caption asset was saved as English because LinkedIn's caption URL had no language code.
+- Caption language is now detected from the cue text, including Vietnamese, Chinese, Japanese, Korean, Cyrillic, Arabic, Hebrew, Thai, Hindi, and common Latin languages.
+- If the selected language is not actually available, the English transcript fallback is used instead of saving the wrong-language file.
+- Language checkboxes now reflect detected caption languages.
+
 ## v2.4.0
 - Fixed batch lesson collection: links with query strings and trailing slashes are recognized again instead of reporting only the current video.
 - Section folders now come from LinkedIn's embedded course outline first; sidebar headings remain a fallback. The `Introduction` section is detected from the course's TOC data.
