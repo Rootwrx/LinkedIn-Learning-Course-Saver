@@ -13,6 +13,7 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 - Downloads the playlist's parts in the background and assembles one local video file.
 - Names the file `<Course> - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) into a per-course folder by default.
 - Works on single-page navigations — the button follows the current lesson without a reload.
+- **Batch mode:** **Save whole course** walks every lesson link in the current course playlist, auto-plays each lesson muted to capture its stream, saves them in order, then returns to the lesson you started from.
 
 No signup, credits, accounts, or external servers. Everything runs locally in your browser.
 
@@ -47,6 +48,16 @@ If you edit the code later, come back here and click the **reload** icon on the 
 
 > Timing matters: signed `dms.licdn.com` URLs expire. Click **Save stream** soon after the video starts. If you waited a long time, reload the lesson page and start the video again.
 
+### Batch download a whole course
+
+1. Open any lesson in the course.
+2. Click **Save lesson** → check the `Course playlist: N lessons found` line.
+3. Click **Save whole course**. The tab will walk the lessons automatically.
+4. Use **Stop batch** at any time to cancel and return to the original lesson.
+5. When it finishes, the status shows `Batch complete: X saved, Y failed` and the tab returns to where you started.
+
+Batch files are prefixed in playlist order (`01 - …`, `02 - …`) so they stay sorted in the course folder.
+
 The popup (toolbar icon) holds the preferred quality and the save-structure setting.
 
 ## Optional: change settings via popup
@@ -67,6 +78,8 @@ The popup (toolbar icon) holds the preferred quality and the save-structure sett
 | Downloaded `.ts` won't play in Windows Media Player | Open it with VLC or mpv, or remux it locally to `.mp4` with ffmpeg. |
 | Saved file has no audio | Some HLS streams split audio into a separate track. This version saves only the video variant. |
 | Download starts but stops | Reload the lesson page to get fresh signed URLs, then retry. |
+| Batch says `0 lessons found` | Scroll the course sidebar so LinkedIn renders its lesson links, then reopen the panel. |
+| Batch reports a failed lesson | The player did not expose a stream within 45 seconds for that lesson. Reload it and save it individually, then retry the batch. |
 
 ## Files
 
@@ -74,7 +87,7 @@ The popup (toolbar icon) holds the preferred quality and the save-structure sett
 | --- | --- |
 | `manifest.json` | MV3 manifest: permissions, host access, content script, background worker. |
 | `background.js` | `webRequest` listener records the player's real HLS URLs per tab, fetches/parses playlists, picks the requested quality, and delegates assembly to the offscreen document. |
-| `content.js` | Injects the shadow-DOM button/panel, asks the background for captured URLs, and sends the save request. |
+| `content.js` | Injects the shadow-DOM button/panel, collects course lesson links, drives batch playback, asks for captured URLs, and sends save requests. |
 | `offscreen.html` / `offscreen.js` | Hidden DOM context that fetches the segments and creates the blob URL. Offscreen documents only expose `chrome.runtime`, so the service worker starts the download. |
 | `popup.html` / `popup.js` | Toolbar settings. |
 | `icons/` | Extension icons (regenerate with `tools/make-icons.ps1`). |

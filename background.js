@@ -424,11 +424,82 @@ async function ensureOffscreen() {
 function buildFilename(meta, extension, folderMode) {
   const lesson = safeName(meta.title || 'lesson');
   const course = safeName(meta.courseTitle || meta.courseSlug || '');
+  const order = meta.order ? String(meta.order).padStart(2, '0') + ' - ' : '';
   const base = course && course.toLowerCase() !== lesson.toLowerCase()
     ? course + ' - ' + lesson
     : lesson;
   const subfolder = folderMode === 'course' && course ? course + '/' : '';
-  return subfolder + base + '.' + extension;
+  return subfolder + order + base + '.' + extension;
+}
+
+async function getBatch() {
+  const data = await chrome.storage.session.get(['llsBatch']);
+  return data.llsBatch || null;
+}
+
+async function setBatch(batch) {
+  await chrome.storage.session.set({ llsBatch: batch });
+}
+
+async function clearBatch() {
+  await chrome.storage.session.remove(['llsBatch']);
+}
+
+function batchSummary(batch) {
+  const ok = (batch.results || []).filter((item) => item.ok).length;
+  const failed = (batch.results || []).length - ok;
+  return ok + ' saved, ' + failed + ' failed';
+}
+
+async function goToBatchLesson(batch, tabId) {
+  const lesson = batch.lessons[batch.index];
+  if (!lesson) return;
+  notify(tabId, null,
+    'Batch ' + (batch.index + 1) + '/' + batch.lessons.length + ': ' + lesson.title,
+    'working');
+  try {
+    await chrome.tabs.update(tabId, { url: lesson.url });
+  } catch (_) {
+    /* tab may have been closed */
+  }
+}
+
+async function finishBatch(tabId) {
+  const batch = await getBatch();
+  if (!batch || !batch.active || batch.tabId !== tabId) return;
+
+  batch.active = false;
+  batch.status = 'done';
+  batch.finishedAt = Date.now();
+  await setBatch(batch);
+
+  notify(tabId, null, 'Batch complete: ' + batchSummary(batch) + '.', 'ok');
+  if (batch.returnUrl) {
+    try {
+      await chrome.tabs.update(tabId, { url: batch.returnUrl });
+    } catch (_) {
+      /* tab may have been closed */
+    }
+  }
+}
+
+async function recordBatchResult(tabId, result) {
+  const batch = await getBatch();
+  if (!batch || !batch.active || batch.tabId !== tabId) return;
+
+  batch.results = batch.results || [];
+  batch.results.push(result);
+  await setBatch(batch);
+
+  const next = batch.index + 1;
+  if (next >= batch.lessons.length) {
+    await finishBatch(tabId);
+    return;
+  }
+
+  batch.index = next;
+  await setBatch(batch);
+  await goToBatchLesson(batch, tabId);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -463,6 +534,79 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     notify(msg.tabId, msg.requestId, msg.message, msg.state);
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (msg.type === 'lls:getBatch') {
+    (async () => {
+      const batch = await getBatch();
+      sendResponse({ ok: true, batch: batch && batch.tabId === tabId ? batch : null });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'lls:batch-start') {
+    (async () => {
+      const lessons = (msg.lessons || []).filter((lesson) => lesson && lesson.url);
+      if (tabId == null || !lessons.length) {
+        sendResponse({ ok: false, error: 'No course lessons were found on this page.' });
+        return;
+      }
+
+      const batch = {
+        active: true,
+        status: 'running',
+        tabId: tabId,
+        courseSlug: msg.courseSlug || '',
+        courseTitle: msg.courseTitle || '',
+        returnUrl: msg.returnUrl || '',
+        resolution: Number(msg.resolution) || 0,
+        index: 0,
+        lessons: lessons,
+        results: [],
+        startedAt: Date.now(),
+      };
+      await setBatch(batch);
+      sendResponse({ ok: true, count: lessons.length });
+      await goToBatchLesson(batch, tabId);
+    })();
+    return true;
+  }
+
+  if (msg.type === 'lls:batch-failed') {
+    (async () => {
+      await recordBatchResult(tabId, {
+        title: msg.title || 'lesson',
+        ok: false,
+        error: msg.error || 'No stream was detected.',
+      });
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'lls:batch-stop') {
+    (async () => {
+      const batch = await getBatch();
+      if (batch && batch.tabId === tabId) {
+        batch.active = false;
+        batch.status = 'stopped';
+        await setBatch(batch);
+        notify(tabId, null, 'Batch stopped: ' + batchSummary(batch) + '.', 'working');
+        if (batch.returnUrl) {
+          try { await chrome.tabs.update(tabId, { url: batch.returnUrl }); } catch (_) { /* ignore */ }
+        }
+      }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'lls:batch-clear') {
+    (async () => {
+      await clearBatch();
+      sendResponse({ ok: true });
+    })();
+    return true;
   }
 
   if (msg.type !== 'lls:download') return false;
@@ -535,11 +679,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         bytes: assembled.bytes,
         resolution: resolution,
       });
+
+      if (msg.batch) {
+        await recordBatchResult(tabId, {
+          title: msg.title || 'lesson',
+          ok: true,
+          filename: filename,
+          order: msg.order || null,
+        });
+      }
     } catch (error) {
-      sendResponse({
-        ok: false,
-        error: error && error.message ? error.message : String(error),
-      });
+      const message = error && error.message ? error.message : String(error);
+      sendResponse({ ok: false, error: message });
+
+      if (msg.batch) {
+        await recordBatchResult(tabId, {
+          title: msg.title || 'lesson',
+          ok: false,
+          error: message,
+          order: msg.order || null,
+        });
+      }
     }
   })();
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.0
+- Added **Save whole course** batch mode: walks every lesson link found in the current course playlist.
+- Batch state is stored in `chrome.storage.session`, so it survives navigation and service-worker restarts.
+- Lessons are auto-played muted (or the Play button is clicked) to trigger the HLS stream capture.
+- Added batch progress, failure tracking, a Stop button, automatic return to the original lesson, and ordered filenames (`01 - …`, `02 - …`).
+
 ## v2.0.3
 - Moved the final `chrome.downloads.download` call from the offscreen document back to the service worker.
 - Offscreen documents now only fetch stream parts and create the blob URL, matching Chrome's `chrome.runtime`-only API restriction.

@@ -9,6 +9,9 @@
   let seq = 0;
   let activeRequestId = null;
   let captures = [];
+  let batchState = null;
+  let playTimer = null;
+  let batchTimer = null;
 
   const host = document.createElement('div');
   host.id = 'lls-host';
@@ -49,6 +52,18 @@
   }
   .dl:hover { background: #004182; }
   .dl:disabled { opacity: .6; cursor: wait; }
+  .batch {
+    width: 100%; margin-top: 8px; padding: 10px; border: 1px solid #0a66c2;
+    border-radius: 6px; background: #fff; color: #0a66c2; font-weight: 600;
+    cursor: pointer; font-size: 13px;
+  }
+  .batch:hover { background: #eef6fd; }
+  .batch:disabled { opacity: .6; cursor: wait; }
+  .stop {
+    width: 100%; margin-top: 8px; padding: 9px; border: 0;
+    border-radius: 6px; background: #b91c1c; color: #fff;
+    font-weight: 600; cursor: pointer; font-size: 12px;
+  }
   .status { margin-top: 10px; font-size: 12px; line-height: 1.45; color: #4b5563; }
   .status.error { color: #b91c1c; }
   .status.ok { color: #047857; }
@@ -68,6 +83,7 @@
   <h2 class="title">Lesson</h2>
   <p class="meta">LinkedIn Learning</p>
   <p class="stream">Waiting for the player…</p>
+  <p class="course">Course playlist: scanning…</p>
   <label for="q">Preferred quality (master playlist only)</label>
   <select id="q">
     <option value="0">Highest available</option>
@@ -76,6 +92,8 @@
     <option value="360">360p</option>
   </select>
   <button class="dl">Save stream</button>
+  <button class="batch">Save whole course</button>
+  <button class="stop" hidden>Stop batch</button>
   <div class="status"></div>
   <div class="hint">Start the video first. For your own subscribed courses only.</div>
 </div>`;
@@ -85,8 +103,11 @@
   const titleEl = root.querySelector('.title');
   const metaEl = root.querySelector('.meta');
   const streamEl = root.querySelector('.stream');
+  const courseEl = root.querySelector('.course');
   const qualityEl = root.querySelector('#q');
   const dlBtn = root.querySelector('.dl');
+  const batchBtn = root.querySelector('.batch');
+  const stopBtn = root.querySelector('.stop');
   const statusEl = root.querySelector('.status');
   const closeBtn = root.querySelector('.close');
 
@@ -143,6 +164,206 @@
     }
   }
 
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function collectLessons() {
+    if (!current) return [];
+    const slug = escapeRegExp(current.courseSlug);
+    const re = new RegExp('^https?://www\\.linkedin\\.com/learning/' + slug + '/([^/?#]+)', 'i');
+    const seen = new Set();
+    const out = [];
+
+    document.querySelectorAll('a[href]').forEach((anchor) => {
+      const href = anchor.href;
+      const match = href.match(re);
+      if (!match) return;
+
+      let clean;
+      try {
+        const url = new URL(href);
+        clean = url.origin + url.pathname;
+      } catch (_) {
+        clean = String(href).split(/[?#]/)[0];
+      }
+      if (seen.has(clean)) return;
+      seen.add(clean);
+
+      const label = (anchor.textContent || anchor.getAttribute('aria-label') || anchor.title || '')
+        .trim().replace(/\s+/g, ' ');
+      out.push({
+        url: clean,
+        title: label.slice(0, 110) || decodeURIComponent(match[1]).replace(/-/g, ' '),
+        slug: decodeURIComponent(match[1]),
+      });
+    });
+
+    const currentUrl = location.origin + location.pathname;
+    if (!seen.has(currentUrl)) {
+      out.unshift({ url: currentUrl, title: current.title, slug: current.videoSlug });
+    }
+    return out;
+  }
+
+  function updateCourseInfo() {
+    if (!current) {
+      courseEl.textContent = '';
+      return;
+    }
+    const count = collectLessons().length;
+    courseEl.textContent = 'Course playlist: ' + count + ' lesson' + (count === 1 ? '' : 's') + ' found.';
+  }
+
+  function sendRuntime(message, callback) {
+    try {
+      chrome.runtime.sendMessage(message, (resp) => {
+        if (chrome.runtime.lastError) {
+          if (callback) callback(null);
+          return;
+        }
+        if (callback) callback(resp);
+      });
+    } catch (_) {
+      if (callback) callback(null);
+    }
+  }
+
+  function tryAutoPlay() {
+    const video = document.querySelector('video');
+    if (video) {
+      video.muted = true;
+      video.defaultMuted = true;
+      try {
+        const playing = video.play();
+        if (playing && typeof playing.catch === 'function') playing.catch(() => {});
+      } catch (_) {
+        /* ignore */
+      }
+      if (!video.paused) {
+        stopAutoPlay();
+        return;
+      }
+    }
+
+    const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+    const playButton = buttons.find((element) => {
+      const text = ((element.getAttribute('aria-label') || '') + ' ' +
+        (element.title || '') + ' ' + (element.textContent || '')).toLowerCase();
+      return /\bplay\b/.test(text);
+    });
+    if (playButton) {
+      try { playButton.click(); } catch (_) { /* ignore */ }
+    }
+  }
+
+  function startAutoPlay() {
+    if (playTimer) return;
+    tryAutoPlay();
+    playTimer = setInterval(tryAutoPlay, 900);
+  }
+
+  function stopAutoPlay() {
+    if (playTimer) {
+      clearInterval(playTimer);
+      playTimer = null;
+    }
+  }
+
+  function showNormalButtons() {
+    stopBtn.hidden = true;
+    dlBtn.disabled = false;
+    batchBtn.disabled = false;
+  }
+
+  function sendBatchDownload(batch, lesson) {
+    const requestId = 'lls-' + Date.now() + '-' + (++seq);
+    activeRequestId = requestId;
+    setStatus('Batch ' + (batch.index + 1) + '/' + batch.lessons.length + ': saving stream…', 'working');
+
+    sendRuntime({
+      type: 'lls:download',
+      requestId: requestId,
+      batch: true,
+      batchIndex: batch.index,
+      order: batch.index + 1,
+      title: lesson.title || (current && current.title) || 'lesson',
+      courseTitle: batch.courseTitle || (current && current.courseTitle) || '',
+      courseSlug: batch.courseSlug || (current && current.courseSlug) || '',
+      resolution: batch.resolution || Number(qualityEl.value) || 0,
+    }, (resp) => {
+      activeRequestId = null;
+      if (!resp || !resp.ok) {
+        setStatus('Batch lesson failed: ' + ((resp && resp.error) || 'unknown error'), 'error');
+      } else {
+        setStatus('Batch saved: ' + resp.filename, 'ok');
+      }
+    });
+  }
+
+  function runBatchLesson(batch) {
+    batchState = batch;
+    stopBtn.hidden = false;
+    dlBtn.disabled = true;
+    batchBtn.disabled = true;
+
+    const lesson = batch.lessons[batch.index] || { title: (current && current.title) || 'Lesson' };
+    titleEl.textContent = lesson.title;
+    metaEl.textContent = batch.courseTitle || (current && current.courseTitle) || 'LinkedIn Learning';
+    setStatus('Batch ' + (batch.index + 1) + '/' + batch.lessons.length + ': ' + lesson.title, 'working');
+    startAutoPlay();
+
+    const started = Date.now();
+    if (batchTimer) clearInterval(batchTimer);
+    batchTimer = setInterval(() => {
+      requestCaptures(() => {
+        const info = streamInfo();
+        if (info.playlists.length) {
+          clearInterval(batchTimer);
+          batchTimer = null;
+          stopAutoPlay();
+          sendBatchDownload(batch, lesson);
+        } else if (Date.now() - started > 45000) {
+          clearInterval(batchTimer);
+          batchTimer = null;
+          stopAutoPlay();
+          sendRuntime({
+            type: 'lls:batch-failed',
+            title: lesson.title,
+            error: 'No stream was detected for this lesson.',
+          });
+        }
+      });
+    }, 1000);
+  }
+
+  function checkBatchState() {
+    sendRuntime({ type: 'lls:getBatch' }, (resp) => {
+      const batch = resp && resp.batch;
+      if (!batch) {
+        batchState = null;
+        showNormalButtons();
+        return;
+      }
+
+      if (batch.status === 'done') {
+        const ok = (batch.results || []).filter((item) => item.ok).length;
+        const failed = (batch.results || []).length - ok;
+        setStatus('Batch complete: ' + ok + ' saved, ' + failed + ' failed.', ok ? 'ok' : 'error');
+        batchState = null;
+        showNormalButtons();
+        sendRuntime({ type: 'lls:batch-clear' });
+        return;
+      }
+
+      if (batch.active) runBatchLesson(batch);
+      else {
+        batchState = null;
+        showNormalButtons();
+      }
+    });
+  }
+
   function readPage() {
     const match = location.href.match(LESSON_RE);
     if (!match) return null;
@@ -186,12 +407,17 @@
     metaEl.textContent = current.courseTitle;
     setStatus('');
     updateStreamStatus();
+    updateCourseInfo();
     requestCaptures();
+    checkBatchState();
   }
 
   fab.addEventListener('click', () => {
     panel.hidden = !panel.hidden;
-    if (!panel.hidden) requestCaptures();
+    if (!panel.hidden) {
+      requestCaptures();
+      updateCourseInfo();
+    }
   });
   closeBtn.addEventListener('click', () => { panel.hidden = true; });
 
@@ -204,7 +430,7 @@
   });
 
   dlBtn.addEventListener('click', () => {
-    if (!current) return;
+    if (!current || (batchState && batchState.active)) return;
 
     const requestId = 'lls-' + Date.now() + '-' + (++seq);
     activeRequestId = requestId;
@@ -243,6 +469,38 @@
         }
       });
     });
+  });
+
+  batchBtn.addEventListener('click', () => {
+    if (!current || (batchState && batchState.active)) return;
+
+    const lessons = collectLessons();
+    if (!lessons.length) {
+      setStatus('No course lessons were found on this page.', 'error');
+      return;
+    }
+
+    batchBtn.disabled = true;
+    sendRuntime({
+      type: 'lls:batch-start',
+      lessons: lessons,
+      courseSlug: current.courseSlug,
+      courseTitle: current.courseTitle,
+      returnUrl: location.href,
+      resolution: Number(qualityEl.value) || 0,
+    }, (resp) => {
+      batchBtn.disabled = false;
+      if (!resp || !resp.ok) {
+        setStatus((resp && resp.error) || 'Could not start the batch.', 'error');
+        return;
+      }
+      setStatus('Starting batch: ' + resp.count + ' lessons…', 'working');
+    });
+  });
+
+  stopBtn.addEventListener('click', () => {
+    setStatus('Stopping batch…', 'working');
+    sendRuntime({ type: 'lls:batch-stop' });
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
