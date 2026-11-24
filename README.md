@@ -89,6 +89,7 @@ The popup (toolbar icon) holds the preferred quality, default download choices, 
 | Downloaded `.ts` won't play in Windows Media Player | Open it with VLC or mpv, or remux it locally to `.mp4` with ffmpeg. |
 | Saved file has no audio | Some HLS streams split audio into a separate track. This version saves only the video variant. |
 | Download starts but stops | Reload the lesson page to get fresh signed URLs, then retry. |
+| Panel says "reload this lesson page" | You reloaded the extension in `chrome://extensions`. Reload the LinkedIn lesson tab with **F5** so the fresh content script attaches. |
 | Batch says `0 videos found` | Reload the lesson page and reopen the panel. LinkedIn's embedded outline is used first; sidebar links are a fallback. |
 | Only the current video is listed | Reload the lesson page so its embedded course data is available, then reopen the panel. Links with query strings are supported. |
 | Saved subtitles are in the wrong language | Reload the lesson page; caption language is detected from the cue text, including Telugu, Tagalog, Turkish, Serbian, Swedish, and Vietnamese. If no track in the selected language exists, English uses the page's embedded transcript rather than saving the wrong file. |

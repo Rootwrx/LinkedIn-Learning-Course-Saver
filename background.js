@@ -1027,19 +1027,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'lls:inspectCaptions') {
     (async () => {
-      const urls = tabId == null ? [] : getCaptureUrls(tabId).captions;
-      const byCode = await inspectCaptionCandidates({ captions: urls });
-      const tracks = Array.from(byCode.values()).map((item) => ({
-        code: item.code,
-        label: item.label,
-        url: item.url,
-        kind: item.kind,
-      }));
-      sendResponse({
-        ok: true,
-        captionTracks: tracks,
-        languages: dedupe(['en'].concat(tracks.map((track) => track.code))),
-      });
+      try {
+        const urls = tabId == null ? [] : getCaptureUrls(tabId).captions;
+        const byCode = await inspectCaptionCandidates({ captions: urls });
+        const tracks = Array.from(byCode.values()).map((item) => ({
+          code: item.code,
+          label: item.label,
+          url: item.url,
+          kind: item.kind,
+        }));
+        sendResponse({
+          ok: true,
+          captionTracks: tracks,
+          languages: dedupe(['en'].concat(tracks.map((track) => track.code))),
+        });
+      } catch (_) {
+        sendResponse({ ok: false, languages: ['en'] });
+      }
     })();
     return true;
   }

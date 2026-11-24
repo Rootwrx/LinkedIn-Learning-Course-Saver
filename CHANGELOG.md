@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.4.3
+- Fixed an error at `content.js:720` (`chrome.storage.sync.set`) after reloading the extension: the old content script no longer throws when its Chrome APIs are invalidated.
+- The panel now detects an invalidated extension context and shows a clear **reload this lesson page** message instead of silently failing to download.
+- Download/option/batch buttons and storage writes are now guarded so a stale page cannot break the download flow.
+- Caption inspection in the worker now always replies, so a translation lookup can never hang a pending download.
+
 ## v2.4.2
 - Fixed caption languages that LinkedIn mislabels: a Telugu asset saved as `.en`, Tagalog as `.es`, Turkish as `.fr`, Serbian/Croatian as `.pt`, and Swedish as `.de` are now detected correctly from the cue text.
 - English fallback now uses the transcript embedded in the lesson page itself (linked to the current video URN) before trying the GraphQL transcript endpoint.

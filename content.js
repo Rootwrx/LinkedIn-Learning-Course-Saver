@@ -15,6 +15,32 @@
   let activeBatchKey = '';
   let playTimer = null;
   let batchTimer = null;
+  let contextWarningShown = false;
+
+  // After reloading the extension in chrome://extensions, the old content
+  // script stays on the page but every chrome.* API is invalidated. Detect it
+  // so we can show a useful message instead of throwing on every interaction.
+  function contextLost() {
+    try {
+      return !chrome || !chrome.runtime || !chrome.runtime.id;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function showContextError() {
+    if (contextWarningShown) return;
+    contextWarningShown = true;
+    try {
+      setStatus(
+        'The extension was reloaded. Reload this lesson page (F5), then open the panel again.',
+        'error'
+      );
+      dlBtn.disabled = true;
+      batchBtn.disabled = true;
+      streamEl.textContent = 'Extension context invalidated — reload the page.';
+    } catch (_) { /* panel may not be ready */ }
+  }
 
   const host = document.createElement('div');
   host.id = 'lls-host';
@@ -154,7 +180,15 @@
     function inspectLanguages() {
       // Caption URLs often have no language code. Ask the worker to read the
       // cue text so the language checkboxes reflect what LinkedIn actually
-      // captured instead of guessing everything is English.
+      // captured instead of guessing everything is English. Always finish,
+      // even if the worker never answers — otherwise a download waiting on
+      // this callback would hang forever.
+      let done = false;
+      function complete() {
+        if (done) return;
+        done = true;
+        finish();
+      }
       sendRuntime({ type: 'lls:inspectCaptions' }, (inspected) => {
         if (inspected && inspected.ok) {
           const languages = dedupeList(['en'].concat(inspected.languages || []));
@@ -164,8 +198,9 @@
             renderLanguages(previous);
           }
         }
-        finish();
+        complete();
       });
+      setTimeout(complete, 2000);
     }
 
     try {
@@ -716,13 +751,24 @@
   }
 
   function savePrefs() {
-    const options = downloadOptions();
-    chrome.storage.sync.set({
-      downloadVideo: options.downloadVideo,
-      downloadSubtitles: options.downloadSubtitles,
-      subtitleLanguages: options.subtitleLanguages,
-      subtitleFormat: options.subtitleFormat,
-    });
+    if (contextLost()) {
+      showContextError();
+      return;
+    }
+    try {
+      const options = downloadOptions();
+      chrome.storage.sync.set({
+        downloadVideo: options.downloadVideo,
+        downloadSubtitles: options.downloadSubtitles,
+        subtitleLanguages: options.subtitleLanguages,
+        subtitleFormat: options.subtitleFormat,
+      }, () => {
+        // Consume lastError so Chrome does not log an unhandled error.
+        void (chrome.runtime && chrome.runtime.lastError);
+      });
+    } catch (_) {
+      showContextError();
+    }
   }
 
   function extractIdentity() {
@@ -1004,13 +1050,27 @@
     renderLanguages(s.subtitleLanguages || ['en']);
   });
   qualityEl.addEventListener('change', () => {
-    chrome.storage.sync.set({ resolution: Number(qualityEl.value) });
+    if (contextLost()) {
+      showContextError();
+      return;
+    }
+    try {
+      chrome.storage.sync.set({ resolution: Number(qualityEl.value) }, () => {
+        void (chrome.runtime && chrome.runtime.lastError);
+      });
+    } catch (_) {
+      showContextError();
+    }
   });
   formatEl.addEventListener('change', savePrefs);
   videoOpt.addEventListener('change', savePrefs);
   subsOpt.addEventListener('change', savePrefs);
 
   dlBtn.addEventListener('click', () => {
+    if (contextLost()) {
+      showContextError();
+      return;
+    }
     if (!current || (batchState && batchState.active)) return;
 
     const requestId = 'lls-' + Date.now() + '-' + (++seq);
@@ -1034,7 +1094,7 @@
         return;
       }
 
-      chrome.runtime.sendMessage(Object.assign({
+      const message = Object.assign({
         type: 'lls:download',
         requestId: requestId,
         title: current.title,
@@ -1046,33 +1106,44 @@
         resolution: Number(qualityEl.value) || 0,
         identity: pageIdentity,
         transcriptLines: (current && current.transcriptLines) || [],
-      }, options), (resp) => {
+      }, options);
+      try {
+        chrome.runtime.sendMessage(message, (resp) => {
+          dlBtn.disabled = false;
+          activeRequestId = null;
+          if (chrome.runtime.lastError) {
+            setStatus('Extension error: ' + chrome.runtime.lastError.message, 'error');
+            return;
+          }
+          if (resp && resp.ok) {
+            const parts = [];
+            if (resp.filename) {
+              parts.push('Saved ' + String(resp.ext || 'video').toUpperCase() +
+                (resp.resolution ? ' (' + resp.resolution + ')' : '') + ': ' + resp.filename);
+            }
+            if (resp.subtitleFiles && resp.subtitleFiles.length) {
+              parts.push('Subtitles: ' + resp.subtitleFiles
+                .map((file) => file.label).join(', '));
+            }
+            if (resp.subtitleError) parts.push('Subtitle warning: ' + resp.subtitleError);
+            setStatus(parts.join(' · ') || 'Saved.', resp.subtitleError ? 'working' : 'ok');
+          } else {
+            setStatus((resp && resp.error) || 'Download failed.', 'error');
+          }
+        });
+      } catch (_) {
         dlBtn.disabled = false;
         activeRequestId = null;
-        if (chrome.runtime.lastError) {
-          setStatus('Extension error: ' + chrome.runtime.lastError.message, 'error');
-          return;
-        }
-        if (resp && resp.ok) {
-          const parts = [];
-          if (resp.filename) {
-            parts.push('Saved ' + String(resp.ext || 'video').toUpperCase() +
-              (resp.resolution ? ' (' + resp.resolution + ')' : '') + ': ' + resp.filename);
-          }
-          if (resp.subtitleFiles && resp.subtitleFiles.length) {
-            parts.push('Subtitles: ' + resp.subtitleFiles
-              .map((file) => file.label).join(', '));
-          }
-          if (resp.subtitleError) parts.push('Subtitle warning: ' + resp.subtitleError);
-          setStatus(parts.join(' · ') || 'Saved.', resp.subtitleError ? 'working' : 'ok');
-        } else {
-          setStatus((resp && resp.error) || 'Download failed.', 'error');
-        }
-      });
+        showContextError();
+      }
     });
   });
 
   batchBtn.addEventListener('click', () => {
+    if (contextLost()) {
+      showContextError();
+      return;
+    }
     if (!current || (batchState && batchState.active)) return;
 
     const lessons = collectLessons();
@@ -1116,6 +1187,10 @@
   });
 
   setInterval(() => {
+    if (contextLost()) {
+      showContextError();
+      return;
+    }
     refresh();
     if (!panel.hidden) requestCaptures();
   }, 1200);
