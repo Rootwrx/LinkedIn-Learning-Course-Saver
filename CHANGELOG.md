@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.2
+- Fixed batch saving three copies of every lesson: duplicate download requests from stale content scripts are now rejected by the service worker, so each lesson is saved exactly once.
+- The status line now says why a lesson fell back to HLS (no progressive MP4 in the lesson data, or no usable link), making format issues diagnosable.
+
 ## v2.5.1
 - Fixed progressive MP4 detection for courses where the embedded metadata is keyed differently: MP4 URLs are now matched to the playing lesson by the digitalmedia asset id shared with the captured HLS playlist.
 - Cleaned lesson titles used for filenames: sidebar noise such as `(Viewed)` and `4m 30s video` is stripped, so files are named `01 - Overview of a network.mp4` instead of `01 - Overview of a network (Viewed) 4m 30s video.ts`.

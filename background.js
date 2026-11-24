@@ -6,6 +6,9 @@ const MAX_CANDIDATES = 10;
 // HLS workers that a page-world fetch/XHR hook cannot observe.
 const capturesByTab = new Map();
 const pageKeyByTab = new Map();
+// Multiple content scripts can survive extension reloads on the same tab.
+// Only the first batch download claim for a lesson may proceed.
+const batchDownloadClaims = new Set();
 
 function lessonKey(href) {
   const match = String(href || '').match(/^https?:\/\/www\.linkedin\.com\/learning\/([^/?#]+)\/([^/?#]+)/i);
@@ -1214,6 +1217,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type !== 'lls:download') return false;
 
+  if (msg.batch) {
+    const claim = [tabId, msg.batchStartedAt, msg.batchIndex, msg.videoSlug].join('|');
+    if (batchDownloadClaims.has(claim)) {
+      sendResponse({ ok: true, duplicate: true, filename: '', subtitleFiles: [] });
+      return false;
+    }
+    batchDownloadClaims.add(claim);
+    // Keep the set from growing across very long batch runs.
+    if (batchDownloadClaims.size > 500) batchDownloadClaims.clear();
+  }
+
   (async () => {
     try {
       const downloadVideo = msg.downloadVideo !== false;
@@ -1247,6 +1261,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       let resolution = '';
       let subtitleFiles = [];
       let subtitleError = '';
+      let videoSource = '';
 
       if (downloadVideo) {
         // Prefer LinkedIn's signed progressive MP4 from the lesson metadata.
@@ -1259,6 +1274,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         );
         if (progressive) {
           extension = 'mp4';
+          videoSource = 'progressive';
           resolution = progressive.height ? progressive.height + 'p' : '';
           filename = buildFilename(msg, extension, folderMode);
           notify(tabId, msg.requestId,
@@ -1282,6 +1298,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
 
           extension = playlist.mapUri ? 'mp4' : 'ts';
+          videoSource = 'hls' + ((msg.progressiveStreams || []).length
+            ? ' (no usable progressive MP4)' : ' (none in lesson data)');
           const mime = extension === 'mp4' ? 'video/mp4' : 'video/mp2t';
           const urls = (playlist.mapUri ? [playlist.mapUri] : []).concat(playlist.segments);
           if (!urls.length) {
@@ -1374,6 +1392,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         filename: filename,
         extension: extension,
         ext: extension,
+        videoSource: videoSource,
         bytes: bytes,
         resolution: resolution,
         subtitleFiles: subtitleFiles,

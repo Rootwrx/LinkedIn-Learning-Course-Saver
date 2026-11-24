@@ -1010,6 +1010,7 @@
       requestId: requestId,
       batch: true,
       batchIndex: batch.index,
+      batchStartedAt: batch.startedAt,
       section: lesson.section || (current && current.section) || '',
       order: lesson.order || batch.index + 1,
       title: lesson.title || (current && current.title) || 'lesson',
@@ -1280,7 +1281,8 @@
             const parts = [];
             if (resp.filename) {
               parts.push('Saved ' + String(resp.ext || 'video').toUpperCase() +
-                (resp.resolution ? ' (' + resp.resolution + ')' : '') + ': ' + resp.filename);
+                (resp.resolution ? ' (' + resp.resolution + ')' : '') + ': ' + resp.filename +
+                (resp.videoSource && resp.ext !== 'mp4' ? ' [' + resp.videoSource + ']' : ''));
             }
             if (resp.subtitleFiles && resp.subtitleFiles.length) {
               parts.push('Subtitles: ' + resp.subtitleFiles
