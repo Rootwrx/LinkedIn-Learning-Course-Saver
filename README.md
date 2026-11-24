@@ -22,6 +22,12 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 
 No signup, credits, accounts, or external servers. Everything runs locally in your browser.
 
+## Documentation
+
+- [User Guide](docs/USER_GUIDE.md) — install, single lessons, batch mode, settings, filenames, troubleshooting.
+- [How it works](docs/HOW_IT_WORKS.md) — architecture, capture model, HLS/MP4 decision, subtitles, batch internals, permissions.
+- [Converters](docs/CONVERTERS.md) — every option for the `.ts` to `.mp4` scripts, including watch mode.
+
 ### About the file format
 
 The extension prefers LinkedIn's own **signed progressive MP4** URLs embedded in the lesson data, so videos are normally saved as real **`.mp4`** files with no remuxing or transcoding. The quality selector picks the closest available resolution; expired links are skipped.
@@ -35,26 +41,29 @@ LinkedIn's HLS playlists do **not** end in `.m3u8` — they look like `/hls-720p
 
 ### Optional: convert leftover `.ts` files to `.mp4`
 
-The extension does **not** bundle ffmpeg, but if you have it installed you can remux any older `.ts` fallbacks losslessly (no re-encoding, so quality is unchanged):
+The extension does **not** bundle ffmpeg and does **not** convert files itself. If you have ffmpeg installed, the bundled scripts can remux older `.ts` fallbacks losslessly (`-c copy`, no re-encoding, no quality loss).
 
-1. Double-click `convert-to-mp4.cmd` and paste the course folder path, or run it from a terminal:
-   ```powershell
-   .\convert-to-mp4.cmd "C:\Users\hex0r\Downloads\Cisco Networking Foundations"
-   ```
-2. Subtitles (`.srt`/`.vtt`) are left untouched and keep matching names.
-3. By default it skips Chrome's `(1)`, `(2)` duplicates and files that already have an `.mp4`. Add `-DeleteOriginals` to remove the `.ts` after a successful remux, or `-IncludeDuplicates` to convert the numbered copies too.
+Recommended dynamic scanner — scans all of Downloads:
 
-ffmpeg is detected from `PATH`; install it with `winget install yt-dlp.FFmpeg` if needed, or pass `-Ffmpeg "C:\path\to\ffmpeg.exe"`.
-
-For automatic discovery, use `convert-all-to-mp4.cmd` instead. It scans everything under your Downloads folder (or a folder you pass) and remuxes every `.ts` it finds:
-
-```cmd
-convert-all-to-mp4.cmd
-convert-all-to-mp4.cmd "C:\Users\hex0r\Downloads\My course" -DeleteOriginals
-convert-all-to-mp4.cmd "C:\Users\hex0r\Downloads" -Watch
+```powershell
+.\convert-all-to-mp4.cmd
 ```
 
-`-Watch` keeps the script running and converts each `.ts` shortly after Chrome finishes writing it — useful if you start it before a batch download. Partial downloads are skipped until their file size is stable.
+Watch a course folder while a batch download runs:
+
+```powershell
+.\convert-all-to-mp4.cmd "C:\Users\hex0r\Downloads\My course" -Watch
+```
+
+One folder, one pass:
+
+```powershell
+.\convert-to-mp4.cmd "C:\Users\hex0r\Downloads\My course"
+```
+
+Subtitles are untouched, existing `.mp4` files are skipped, and Chrome's `(1)`/`(2)` duplicates are skipped by default. Add `-DeleteOriginals` to remove `.ts` files after a successful remux.
+
+> In PowerShell, use the `.\` prefix for local commands. See [Converters](docs/CONVERTERS.md) for every option, watch-mode behavior, ffmpeg setup, and troubleshooting.
 
 ## Install (unpacked / developer mode)
 
@@ -72,7 +81,7 @@ If you edit the code later, come back here and click the **reload** icon on the 
 2. Open a lesson you can play and **let the video start** — the player must fetch its HLS playlist before the button can save anything.
 3. Click **Save lesson** in the bottom-right. The panel shows what was detected, for example `Stream detected (720p): 2 playlists ready.`
 4. Under **Download**, keep **Video** and/or **Subtitles** checked. English is checked by default; check any additional languages LinkedIn lists for that lesson.
-5. Choose a preferred quality (only used when a master playlist is available) and a subtitle format (**SRT** by default, or **VTT**), then click **Save stream**.
+5. Choose a preferred quality (used for master HLS playlists and progressive MP4 selection) and a subtitle format (**SRT** by default, or **VTT**), then click **Save stream**.
 6. Watch the status line for progress. Files land in `Downloads/<Course>/<Section>/` (or flat in `Downloads` if you chose that).
 
 > Timing matters: signed `dms.licdn.com` and progressive MP4 URLs expire. Click **Save stream** soon after the video starts. If you waited a long time, reload the lesson page and start the video again.
@@ -85,7 +94,7 @@ If you edit the code later, come back here and click the **reload** icon on the 
 4. Use **Stop batch** at any time to cancel and return to the original lesson.
 5. When it finishes, the status shows `Batch complete: X saved, Y failed` and the tab returns to where you started.
 
-Batch files are prefixed in outline order (`01 - …`, `02 - …`) so they stay sorted. With sections, the layout is `Downloads/<Course>/<Section>/01 - <Lesson>.ts`, and the next section starts again at `01`. Quizzes are omitted. Subtitle-only batches wait briefly for the player to expose a caption track before saving.
+Batch files are prefixed in outline order (`01 - …`, `02 - …`) so they stay sorted. With sections, the layout is `Downloads/<Course>/<Section>/01 - <Lesson>.mp4` (or `.ts` when HLS fallback is used), and the next section starts again at `01`. Quizzes are omitted. Subtitle-only batches wait briefly for the player to expose a caption track before saving.
 
 Lesson links with query strings are handled, and LinkedIn's embedded course outline is preferred over sidebar scraping. If neither exposes sections, the extension falls back to one course folder with continuous numbering.
 
@@ -128,9 +137,12 @@ The popup (toolbar icon) holds the preferred quality, default download choices, 
 | `content.js` | Injects the shadow-DOM button/panel and download/language checkboxes, collects course lesson links, drives batch playback, asks for captured URLs, and sends save requests. |
 | `offscreen.html` / `offscreen.js` | Hidden DOM context that fetches the segments or subtitle text and creates the blob URL. Offscreen documents only expose `chrome.runtime`, so the service worker starts the download. |
 | `popup.html` / `popup.js` | Toolbar settings. |
+| `convert-to-mp4.ps1` / `.cmd` | One-folder ffmpeg remux helper for leftover `.ts` files. |
+| `convert-all-to-mp4.ps1` / `.cmd` | Dynamic `.ts` scanner with optional `-Watch` mode. |
+| `docs/` | User guide, architecture guide, and converter reference. |
 | `icons/` | Extension icons (regenerate with `tools/make-icons.ps1`). |
 
-## Roadmap (not in v2)
+## Not included
 
-- Optional local `.ts` → `.mp4` remux/transcode.
 - Exercise files and a per-course manifest.
+- Automatic in-extension transcoding or bundled ffmpeg. Conversion is an optional external script using an ffmpeg you already have.

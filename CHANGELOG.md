@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- Added full documentation: `docs/USER_GUIDE.md`, `docs/HOW_IT_WORKS.md`, and `docs/CONVERTERS.md`.
+- README now links to the guides and documents the converter scripts and their options.
+
 ## v2.5.5
 - Added `convert-all-to-mp4.ps1` / `convert-all-to-mp4.cmd`: a dynamic scanner that finds `.ts` files anywhere under Downloads (or a chosen folder) and remuxes them to `.mp4` with ffmpeg.
 - `-Watch` mode keeps running and converts each file shortly after Chrome finishes writing it, skipping downloads still in progress.
