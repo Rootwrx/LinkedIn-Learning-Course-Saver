@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.4.7
+- The subtitle language list in the lesson panel is now scrollable (capped height) instead of pushing the save buttons off-screen when a lesson exposes many caption languages.
+- The panel itself now scrolls if it is taller than the browser window, so every control stays reachable on short screens.
+
 ## v2.4.6
 - English subtitles now use LinkedIn's own language metadata: caption files embedded in the lesson page carry an authoritative `locale.language`, which is preferred over guessing from opaque URLs or cue text. This fixes lessons where all captured caption assets were foreign-language but an English track was actually available.
 - Caption inspection now prioritises these page-provided tracks, so a translated asset can no longer be saved under the wrong language code.

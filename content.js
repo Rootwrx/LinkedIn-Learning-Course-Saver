@@ -64,6 +64,8 @@
     width: 330px; box-sizing: border-box; padding: 16px;
     border-radius: 12px; background: #fff; color: #1d2226;
     box-shadow: 0 10px 34px rgba(0,0,0,.3); border: 1px solid #e0e0e0;
+    /* Keep the whole panel reachable on short screens. */
+    max-height: calc(100vh - 100px); overflow-y: auto; overscroll-behavior: contain;
   }
   .panel[hidden] { display: none; }
   h2 { margin: 0 22px 4px 0; font-size: 15px; line-height: 1.35; }
@@ -102,7 +104,16 @@
   .options-title { margin: 0 0 7px; font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
   .check { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; font-size: 12px; font-weight: 500; color: #374151; cursor: pointer; }
   .check input { width: 14px; height: 14px; margin: 0; accent-color: #0a66c2; }
-  .langs { margin: 8px 0 0 21px; padding-top: 8px; border-top: 1px dashed #d1d5db; }
+  .langs {
+    margin: 8px 0 0 21px; padding: 8px 6px 2px 0; border-top: 1px dashed #d1d5db;
+    /* Many lessons expose a dozen+ caption languages; keep the list compact
+       so the save buttons below it stay visible. */
+    max-height: 150px; overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent;
+  }
+  .langs::-webkit-scrollbar { width: 7px; }
+  .langs::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  .langs::-webkit-scrollbar-track { background: transparent; }
   .langs:empty { display: none; }
   .status { margin-top: 10px; font-size: 12px; line-height: 1.45; color: #4b5563; }
   .status.error { color: #b91c1c; }
