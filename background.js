@@ -177,7 +177,10 @@ const LANGUAGE_NAMES = {
   fi: 'Finnish', pl: 'Polish', ru: 'Russian', tr: 'Turkish', ja: 'Japanese',
   ko: 'Korean', zh: 'Chinese', ar: 'Arabic', hi: 'Hindi', id: 'Indonesian',
   vi: 'Vietnamese', th: 'Thai', cs: 'Czech', el: 'Greek', he: 'Hebrew',
-  ro: 'Romanian', uk: 'Ukrainian',
+  ro: 'Romanian', uk: 'Ukrainian', te: 'Telugu', ta: 'Tamil', kn: 'Kannada',
+  ml: 'Malayalam', bn: 'Bengali', gu: 'Gujarati', pa: 'Punjabi', si: 'Sinhala',
+  tl: 'Tagalog', fil: 'Tagalog', sr: 'Serbian', hr: 'Croatian', bs: 'Bosnian',
+  sv: 'Swedish',
 };
 const LANGUAGE_ALIASES = {
   eng: 'en', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de', spa: 'es',
@@ -185,7 +188,8 @@ const LANGUAGE_ALIASES = {
   nor: 'no', fin: 'fi', pol: 'pl', rus: 'ru', tur: 'tr', jpn: 'ja',
   kor: 'ko', zho: 'zh', chi: 'zh', ara: 'ar', hin: 'hi', ind: 'id',
   vie: 'vi', tha: 'th', ces: 'cs', cze: 'cs', ell: 'el', gre: 'el',
-  heb: 'he', ron: 'ro', rum: 'ro', ukr: 'uk',
+  heb: 'he', ron: 'ro', rum: 'ro', ukr: 'uk', fil: 'tl', tag: 'tl',
+  srp: 'sr', hrv: 'hr', bos: 'bs',
 };
 
 function languageInfo(value) {
@@ -552,14 +556,14 @@ function srtTime(ms) {
     String(seconds).padStart(2, '0') + ',' + String(millis).padStart(3, '0');
 }
 
-function buildTranscriptSrt(lines) {
+function buildTranscriptSrt(lines, forceMs) {
   const prepared = (lines || []).map((line) => ({
     text: String(line.text == null ? (line.caption || '') : line.text).trim(),
     start: Number(line.start == null ? line.transcriptStartAt : line.start),
   })).filter((line) => line.text && Number.isFinite(line.start));
   const sorted = prepared.sort((a, b) => a.start - b.start);
   const last = sorted.length ? sorted[sorted.length - 1].start : 0;
-  const alreadyMs = last > 10000;
+  const alreadyMs = !!forceMs || last > 10000;
   const normalized = sorted.map((line) => ({
     text: line.text,
     start: alreadyMs ? Math.round(line.start) : Math.round(line.start * 1000),
@@ -641,6 +645,14 @@ function detectCaptionLanguage(text) {
   const count = (pattern) => (plain.match(pattern) || []).length;
   if (count(/[\u3040-\u30ff]/g) > 2) return 'ja';
   if (count(/[\uac00-\ud7af]/g) > 2) return 'ko';
+  if (count(/[\u0c00-\u0c7f]/g) > 2) return 'te';
+  if (count(/[\u0c80-\u0cff]/g) > 2) return 'kn';
+  if (count(/[\u0d00-\u0d7f]/g) > 2) return 'ml';
+  if (count(/[\u0b80-\u0bff]/g) > 2) return 'ta';
+  if (count(/[\u0a80-\u0aff]/g) > 2) return 'gu';
+  if (count(/[\u0a00-\u0a7f]/g) > 2) return 'pa';
+  if (count(/[\u0980-\u09ff]/g) > 2) return 'bn';
+  if (count(/[\u0d80-\u0dff]/g) > 2) return 'si';
   if (count(/[\u4e00-\u9fff]/g) > 2) return 'zh';
   if (count(/[\u0600-\u06ff]/g) > 2) return 'ar';
   if (count(/[\u0590-\u05ff]/g) > 2) return 'he';
@@ -661,18 +673,38 @@ function detectCaptionLanguage(text) {
   );
   if (vietnameseLetters >= 1 && vietnameseTones >= 2) return 'vi';
 
-  const words = plain.split(/[^a-zà-ÿœ]+/).filter(Boolean);
-  const has = (...wanted) => wanted.some((word) => words.includes(word));
-  if (/[ñ¿¡]/.test(plain) || has('que', 'para', 'los', 'las', 'una', 'estar', 'está')) return 'es';
-  if (/[œç]/.test(plain) || has('les', 'des', 'une', 'dans', 'pour', 'être')) return 'fr';
-  if (/[ßäöü]/.test(plain) || has('der', 'die', 'das', 'und', 'ist', 'nicht')) return 'de';
-  if (/[ãõ]/.test(plain) || has('não', 'uma', 'para', 'com', 'este')) return 'pt';
-  if (has('gli', 'che', 'non', 'una', 'della', 'nell')) return 'it';
+  const words = plain.split(/[^a-z\u00c0-\u024f\u1e00-\u1eff]+/).filter(Boolean);
+  const hits = (...wanted) => wanted.filter((word) => words.includes(word)).length;
+
+  // Strong markers first: these are frequently mislabelled by LinkedIn.
+  if (/[đčćžš]/.test(plain) && hits('se', 'mogu', 'na', 'povezati', 'različite')) return 'sr';
+  if (hits('ang', 'mga', 'ay', 'na', 'sa', 'ng') >= 3) return 'tl';
+  if (/[ışğ]/.test(plain) || hits('ve', 'bir', 'için', 'olarak', 'şekillerde') >= 2) return 'tr';
+  if (/[åäö]/.test(plain) && hits('och', 'att', 'som', 'kan', 'på', 'är', 'nätverk') >= 2) return 'sv';
+  if (/[øæ]/.test(plain) && hits('og', 'at', 'som', 'kan', 'på', 'er', 'ikke') >= 2) return 'no';
+
+  if (/[ñ¿¡]/.test(plain) || hits('que', 'para', 'los', 'las', 'una', 'está') >= 2) return 'es';
+  if (/œ/.test(plain) || hits('les', 'des', 'une', 'dans', 'pour', 'être') >= 2) return 'fr';
+  if (/ß/.test(plain) || hits('der', 'die', 'das', 'und', 'ist', 'nicht') >= 2) return 'de';
+  if (/[ãõ]/.test(plain) || hits('não', 'uma', 'para', 'com', 'este') >= 2) return 'pt';
+  if (hits('gli', 'che', 'non', 'una', 'della', 'nell') >= 2) return 'it';
 
   return '';
 }
 
-async function fetchTranscriptSrt(courseSlug, videoSlug, identity) {
+async function fetchTranscriptSrt(courseSlug, videoSlug, identity, transcriptLines) {
+  // The lesson page embeds the English transcript in its course data. Prefer
+  // that over the GraphQL fallback: it is tied to the exact video and does
+  // not depend on a query id that LinkedIn can change.
+  if (Array.isArray(transcriptLines) && transcriptLines.length) {
+    const prepared = transcriptLines.map((line) => ({
+      caption: line && line.caption,
+      transcriptStartAt: line && (line.transcriptStartAt == null
+        ? line.start : line.transcriptStartAt),
+    }));
+    const srt = buildTranscriptSrt(findTranscriptLines({ lines: prepared }) || [], true);
+    if (srt) return srt;
+  }
   if (!courseSlug || !videoSlug) return '';
   const url = new URL('https://www.linkedin.com/learning-api/graphql');
   url.searchParams.set('includeWebMetadata', 'true');
@@ -746,7 +778,9 @@ async function chooseSubtitleTracks(msg, requestId, tabId) {
   let transcriptSrt = '';
   async function transcriptFallback() {
     if (transcriptSrt) return transcriptSrt;
-    transcriptSrt = await fetchTranscriptSrt(msg.courseSlug, msg.videoSlug, msg.identity);
+    transcriptSrt = await fetchTranscriptSrt(
+      msg.courseSlug, msg.videoSlug, msg.identity, msg.transcriptLines
+    );
     return transcriptSrt;
   }
 

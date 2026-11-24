@@ -376,6 +376,7 @@
     const videos = new Map();
     const sections = [];
     const courses = [];
+    const transcripts = new Map();
     const sectionSeen = new Set();
 
     for (const object of collectObjects(root)) {
@@ -387,7 +388,24 @@
         videos.set(videoId, {
           slug: safeDecode(object.slug),
           title: cleanText(object.title || object.name || '').slice(0, 110),
+          transcriptUrns: urnsFrom(
+            object.transcripts || object.star_transcriptsResolutionResult || []
+          ),
         });
+      }
+
+      if (/learningApiTranscript:/i.test(urn) || /decoratedtranscript/i.test(type)) {
+        const lines = (Array.isArray(object.lines) ? object.lines : [])
+          .map((line) => ({
+            caption: cleanText(line && (line.caption == null ? line.text : line.caption)),
+            transcriptStartAt: line && (line.transcriptStartAt == null
+              ? line.start : line.transcriptStartAt),
+          }))
+          .filter((line) => line.caption && Number.isFinite(Number(line.transcriptStartAt)));
+        const transcriptUrn = cleanText(object.cachingKey || object.entityUrn || urn);
+        if (lines.length && transcriptUrn && /learningApiTranscript:/i.test(transcriptUrn)) {
+          transcripts.set(transcriptUrn, lines);
+        }
       }
 
       if (/toc\.section/i.test(type) || /learningApiTocSection:/i.test(urn)) {
@@ -412,13 +430,18 @@
         });
       }
     }
-    return { videos: videos, sections: sections, courses: courses };
+    return {
+      videos: videos,
+      sections: sections,
+      courses: courses,
+      transcripts: transcripts,
+    };
   }
 
   let courseDataCache = { key: '', entries: [], courseTitle: '' };
 
   function courseDataForCurrent() {
-    if (!current) return { entries: [], courseTitle: '' };
+    if (!current) return { entries: [], courseTitle: '', transcriptLines: [], videoTitle: '' };
     const key = location.href + '|' + current.courseSlug + '|' + current.videoSlug;
     if (courseDataCache.key === key) return courseDataCache;
 
@@ -440,6 +463,7 @@
             chosen = {
               sections: sections,
               videos: data.videos,
+              transcripts: data.transcripts,
               courseTitle: course.title,
             };
             break;
@@ -456,7 +480,12 @@
         const knowsCurrent = Array.from(data.videos.values())
           .some((video) => normalizeSlug(video.slug) === currentSlug);
         if (knowsCurrent && data.sections.length) {
-          chosen = { sections: data.sections, videos: data.videos, courseTitle: '' };
+          chosen = {
+            sections: data.sections,
+            videos: data.videos,
+            transcripts: data.transcripts,
+            courseTitle: '',
+          };
           break;
         }
       }
@@ -487,10 +516,30 @@
       }
     }
 
+    let transcriptLines = [];
+    let videoTitle = '';
+    if (chosen) {
+      const currentSlug = normalizeSlug(current.videoSlug);
+      const video = Array.from(chosen.videos.values())
+        .find((item) => normalizeSlug(item.slug) === currentSlug);
+      if (video) {
+        videoTitle = cleanText(video.title).slice(0, 110);
+        for (const urn of video.transcriptUrns || []) {
+          const lines = chosen.transcripts && chosen.transcripts.get(urn);
+          if (lines && lines.length) {
+            transcriptLines = lines;
+            break;
+          }
+        }
+      }
+    }
+
     courseDataCache = {
       key: key,
       entries: entries,
       courseTitle: chosen ? chosen.courseTitle : '',
+      transcriptLines: transcriptLines,
+      videoTitle: videoTitle,
     };
     return courseDataCache;
   }
@@ -593,6 +642,10 @@
     if (!current) return;
     const data = courseDataForCurrent();
     if (data.courseTitle) current.courseTitle = data.courseTitle;
+    if (data.videoTitle && /^(lesson|video|untitled|linkedin learning)$/i.test(current.title)) {
+      current.title = data.videoTitle;
+    }
+    current.transcriptLines = data.transcriptLines || [];
     const mine = collectLessons().find((lesson) => lesson.slug === current.videoSlug);
     if (mine) {
       current.section = mine.section;
@@ -775,6 +828,7 @@
       downloadSubtitles: !!batch.downloadSubtitles,
       subtitleLanguages: (batch.subtitleLanguages || []).slice(),
       subtitleFormat: batch.subtitleFormat || 'srt',
+      transcriptLines: (current && current.transcriptLines) || [],
     }, (resp) => {
       activeRequestId = null;
       if (!resp || !resp.ok) {
@@ -991,6 +1045,7 @@
         order: current.order || '',
         resolution: Number(qualityEl.value) || 0,
         identity: pageIdentity,
+        transcriptLines: (current && current.transcriptLines) || [],
       }, options), (resp) => {
         dlBtn.disabled = false;
         activeRequestId = null;

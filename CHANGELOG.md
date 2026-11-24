@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.4.2
+- Fixed caption languages that LinkedIn mislabels: a Telugu asset saved as `.en`, Tagalog as `.es`, Turkish as `.fr`, Serbian/Croatian as `.pt`, and Swedish as `.de` are now detected correctly from the cue text.
+- English fallback now uses the transcript embedded in the lesson page itself (linked to the current video URN) before trying the GraphQL transcript endpoint.
+- Lesson titles no longer fall back to the generic `LinkedIn Learning` string when the embedded video metadata has the real title.
+- Added detection for Telugu, Tamil, Kannada, Malayalam, Bengali, Gujarati, Punjabi, Sinhala, Tagalog, Serbian/Croatian, Swedish, Turkish, and Vietnamese.
+
 ## v2.4.1
 - Fixed a case where a Vietnamese caption asset was saved as English because LinkedIn's caption URL had no language code.
 - Caption language is now detected from the cue text, including Vietnamese, Chinese, Japanese, Korean, Cyrillic, Arabic, Hebrew, Thai, Hindi, and common Latin languages.
