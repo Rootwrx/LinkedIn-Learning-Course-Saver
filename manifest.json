@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "LinkedIn Learning Video Saver",
   "short_name": "LL Video Saver",
-  "version": "2.4.5",
+  "version": "2.4.6",
   "description": "Captures the stream your lesson player actually uses and saves the video and selected subtitles locally.",
   "permissions": ["downloads", "storage", "tabs", "offscreen", "webRequest", "webNavigation"],
   "host_permissions": [

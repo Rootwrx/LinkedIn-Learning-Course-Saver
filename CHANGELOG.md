@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.6
+- English subtitles now use LinkedIn's own language metadata: caption files embedded in the lesson page carry an authoritative `locale.language`, which is preferred over guessing from opaque URLs or cue text. This fixes lessons where all captured caption assets were foreign-language but an English track was actually available.
+- Caption inspection now prioritises these page-provided tracks, so a translated asset can no longer be saved under the wrong language code.
+- Expanded language labels for Telugu, Tamil, Kannada, Malayalam, Bengali, Gujarati, Punjabi, Sinhala, Tagalog, Serbian/Croatian, and other locales.
+
 ## v2.4.5
 - English subtitles now try the lesson page's own authenticated GraphQL endpoint (same-origin, with CSRF token) before giving up, so a captionless lesson can still produce an English transcript.
 - The service worker falls back to its direct fetch only if the page-side request is unavailable.

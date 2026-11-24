@@ -215,6 +215,11 @@ function languageInfo(value) {
   };
 }
 
+function normalizeLanguageCode(value) {
+  const info = languageInfo(value);
+  return info ? info.code : String(value || '').trim().toLowerCase().split(/[-_]/)[0];
+}
+
 function languageFromUrl(url) {
   try {
     const u = new URL(url);
@@ -761,9 +766,12 @@ async function fetchTranscriptSrt(courseSlug, videoSlug, identity, transcriptLin
 }
 
 async function inspectCaptionCandidates(msg) {
-  const candidates = dedupeSubtitleTracks(
-    (msg.subtitles || []).concat(msg.captionTracks || [])
-  );
+  const allTracks = msg.captionTracks || [];
+  // Page metadata is authoritative, so examine it before generic captures.
+  const ordered = allTracks.filter((track) => track && track.kind === 'page')
+    .concat(allTracks.filter((track) => track && track.kind !== 'page'))
+    .concat(msg.subtitles || []);
+  const candidates = dedupeSubtitleTracks(ordered);
   for (const url of dedupe(msg.captions || [])) {
     const info = languageFromUrl(url);
     candidates.push({
@@ -782,10 +790,14 @@ async function inspectCaptionCandidates(msg) {
     } catch (_) {
       continue;
     }
-    const code = detectCaptionLanguage(text) || track.code || 'en';
+    // A page-provided code comes from LinkedIn's own locale metadata. For
+    // every other source, fall back to detection from the cue text.
+    const code = (track.kind === 'page' && track.code)
+      ? normalizeLanguageCode(track.code)
+      : (detectCaptionLanguage(text) || track.code || 'en');
     const label = LANGUAGE_NAMES[code] || track.label || code;
     const existing = byCode.get(code);
-    if (!existing || (track.kind === 'hls' && existing.kind !== 'hls')) {
+    if (!existing || (track.kind !== 'captured' && existing.kind === 'captured')) {
       byCode.set(code, {
         code: code,
         label: label,
@@ -1058,7 +1070,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const urls = tabId == null ? [] : getCaptureUrls(tabId).captions;
-        const byCode = await inspectCaptionCandidates({ captions: urls });
+        const byCode = await inspectCaptionCandidates({
+          captions: urls,
+          captionTracks: msg.pageCaptionTracks || [],
+        });
         const tracks = Array.from(byCode.values()).map((item) => ({
           code: item.code,
           label: item.label,
@@ -1175,7 +1190,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         playlists: fromTab.playlists,
         segments: fromTab.segments,
         captions: fromTab.captions,
-        captionTracks: fromTab.captionTracks,
+        // Page metadata has authoritative language codes; keep it alongside
+        // whatever webRequest captured instead of replacing it.
+        captionTracks: dedupeSubtitleTracks(
+          (msg.pageCaptionTracks || []).concat(fromTab.captionTracks || [])
+        ),
       });
 
       let chosen = null;
