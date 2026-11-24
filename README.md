@@ -33,7 +33,18 @@ If a lesson does not expose a progressive MP4, it falls back to assembling the H
 
 LinkedIn's HLS playlists do **not** end in `.m3u8` — they look like `/hls-720p…/<id>/0/<timestamp>`. The extension identifies them by `Content-Type: application/vnd.apple.mpegURL`, not by the URL suffix.
 
-Converting a `.ts` fallback to a normal `.mp4` needs a local remuxer (for example ffmpeg); none is bundled.
+### Optional: convert leftover `.ts` files to `.mp4`
+
+The extension does **not** bundle ffmpeg, but if you have it installed you can remux any older `.ts` fallbacks losslessly (no re-encoding, so quality is unchanged):
+
+1. Double-click `convert-to-mp4.cmd` and paste the course folder path, or run it from a terminal:
+   ```powershell
+   .\convert-to-mp4.cmd "C:\Users\hex0r\Downloads\Cisco Networking Foundations"
+   ```
+2. Subtitles (`.srt`/`.vtt`) are left untouched and keep matching names.
+3. By default it skips Chrome's `(1)`, `(2)` duplicates and files that already have an `.mp4`. Add `-DeleteOriginals` to remove the `.ts` after a successful remux, or `-IncludeDuplicates` to convert the numbered copies too.
+
+ffmpeg is detected from `PATH`; install it with `winget install yt-dlp.FFmpeg` if needed, or pass `-Ffmpeg "C:\path\to\ffmpeg.exe"`.
 
 ## Install (unpacked / developer mode)
 

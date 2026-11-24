@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.5.3
+- Added optional `convert-to-mp4.ps1` / `convert-to-mp4.cmd` helpers that losslessly remux leftover `.ts` files using an ffmpeg already installed on your machine. Nothing is bundled, and subtitles are left untouched.
+
 ## v2.5.2
 - Fixed batch saving three copies of every lesson: duplicate download requests from stale content scripts are now rejected by the service worker, so each lesson is saved exactly once.
 - The status line now says why a lesson fell back to HLS (no progressive MP4 in the lesson data, or no usable link), making format issues diagnosable.
