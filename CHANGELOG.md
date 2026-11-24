@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.1
+- Fixed progressive MP4 detection for courses where the embedded metadata is keyed differently: MP4 URLs are now matched to the playing lesson by the digitalmedia asset id shared with the captured HLS playlist.
+- Cleaned lesson titles used for filenames: sidebar noise such as `(Viewed)` and `4m 30s video` is stripped, so files are named `01 - Overview of a network.mp4` instead of `01 - Overview of a network (Viewed) 4m 30s video.ts`.
+
 ## v2.5.0
 - Videos are now saved as real **`.mp4`** files whenever LinkedIn exposes a signed progressive MP4 in the lesson metadata. No remuxing, transcoding, or extra software is needed.
 - The quality selector picks the closest available progressive resolution; expired signed links are skipped.

@@ -276,6 +276,20 @@
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  // Sidebar anchors contain progress badges and durations ("(Viewed) 4m 30s
+  // video"). Those are UI noise, not part of the lesson title.
+  function cleanLessonTitle(value) {
+    let title = cleanText(value).replace(/\s+/g, ' ').trim();
+    for (let i = 0; i < 3; i++) {
+      const before = title;
+      title = title.replace(/\s+(?:\d+\s*[hms]\s*){1,3}video\s*$/i, '');
+      title = title.replace(/\s+video\s*$/i, '');
+      title = title.replace(/\s*\((?:viewed|in progress|completed|not started)\)\s*$/i, '');
+      if (title === before) break;
+    }
+    return title.replace(/[\s\-–—:]+$/, '').trim().slice(0, 110);
+  }
+
   function safeDecode(value) {
     try { return decodeURIComponent(value || ''); } catch (_) { return String(value || ''); }
   }
@@ -504,7 +518,7 @@
       if (videoId && object.slug) {
         videos.set(videoId, {
           slug: safeDecode(object.slug),
-          title: cleanText(object.title || object.name || '').slice(0, 110),
+          title: cleanLessonTitle(object.title || object.name || ''),
           lyndaId: lyndaId,
           transcriptUrns: urnsFrom(
             object.transcripts || object.star_transcriptsResolutionResult || []
@@ -679,14 +693,20 @@
     // the current video, searching every embedded root for robustness.
     const progressiveStreams = [];
     const seenProgressive = new Set();
+    const addStreams = (list, priority) => {
+      for (const stream of list || []) {
+        if (seenProgressive.has(stream.url)) continue;
+        seenProgressive.add(stream.url);
+        progressiveStreams.push(Object.assign({}, stream, { priority: priority }));
+      }
+    };
     if (currentLyndaId) {
       for (const data of parsed) {
-        for (const stream of (data.progressive || {}).get(currentLyndaId) || []) {
-          if (seenProgressive.has(stream.url)) continue;
-          seenProgressive.add(stream.url);
-          progressiveStreams.push(stream);
-        }
+        addStreams((data.progressive || {}).get(currentLyndaId), 2);
       }
+    }
+    for (const data of parsed) {
+      for (const list of (data.progressive || {}).values()) addStreams(list, 1);
     }
 
     courseDataCache = {
@@ -733,7 +753,7 @@
 
       out.push({
         url: url.origin + url.pathname.replace(/\/+$/, ''),
-        title: label || lessonSlug.replace(/-/g, ' '),
+        title: cleanLessonTitle(label) || lessonSlug.replace(/-/g, ' '),
         slug: lessonSlug,
         section: sectionForAnchor(anchor, current.courseSlug),
         order: 0,

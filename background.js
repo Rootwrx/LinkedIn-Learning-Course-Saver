@@ -402,15 +402,33 @@ function pickVariant(variants, wanted) {
   return pool.slice().sort((a, b) => (b.height - a.height) || (b.bandwidth - a.bandwidth))[0];
 }
 
-function pickProgressiveStream(streams, wanted) {
+// HLS playlists and progressive MP4s for the same lesson share the LinkedIn
+// digitalmedia asset id in their /dms/prv/vid/ path. That is the reliable way
+// to pick the right video when a page embeds metadata for many lessons.
+function videoAssetId(url) {
+  const match = String(url || '').match(/\/dms\/prv\/vid\/(?:pl\/)?([A-Za-z0-9_-]+)\//i);
+  return match ? match[1] : '';
+}
+
+function pickProgressiveStream(streams, wanted, playlistUrls) {
   const now = Date.now();
   const valid = (streams || []).filter((stream) => stream &&
     /^https:\/\/(?:www\.)?linkedin\.com\/dms\//i.test(String(stream.url || '')) &&
     (!stream.expiresAt || Number(stream.expiresAt) > now)
   );
   if (!valid.length) return null;
-  const withHeight = valid.filter((stream) => Number(stream.height) > 0);
-  const pool = withHeight.length ? withHeight : valid;
+
+  const ids = new Set(
+    (playlistUrls || []).map(videoAssetId).filter(Boolean)
+  );
+  let candidates = valid;
+  if (ids.size) {
+    candidates = valid.filter((stream) => ids.has(videoAssetId(stream.url)));
+    if (!candidates.length) return null;
+  }
+  candidates.sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
+  const withHeight = candidates.filter((stream) => Number(stream.height) > 0);
+  const pool = withHeight.length ? withHeight : candidates;
   const height = (stream) => Number(stream.height) || 0;
 
   if (wanted > 0) {
@@ -1236,7 +1254,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // back to assembling the captured HLS stream when it is unavailable
         // or has expired.
         const progressive = pickProgressiveStream(
-          msg.progressiveStreams, Number(msg.resolution) || 0
+          msg.progressiveStreams, Number(msg.resolution) || 0,
+          (request.playlists || []).concat(request.segments || [])
         );
         if (progressive) {
           extension = 'mp4';
