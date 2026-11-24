@@ -33,12 +33,14 @@
     contextWarningShown = true;
     try {
       setStatus(
-        'The extension was reloaded. Reload this lesson page (F5), then open the panel again.',
+        'The extension was reloaded. Click below to restart this lesson page.',
         'error'
       );
       dlBtn.disabled = true;
       batchBtn.disabled = true;
       streamEl.textContent = 'Extension context invalidated — reload the page.';
+      reloadBtn.hidden = false;
+      panel.hidden = false;
     } catch (_) { /* panel may not be ready */ }
   }
 
@@ -111,6 +113,11 @@
     background: none; font-size: 18px; cursor: pointer; color: #9ca3af;
   }
   .hint { margin-top: 12px; font-size: 11px; color: #9ca3af; }
+  .reload-page {
+    width: 100%; margin-top: 10px; padding: 10px; border: 0; border-radius: 6px;
+    background: #b45309; color: #fff; font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  .reload-page:hover { background: #92400e; }
 </style>
 <div class="fab" title="Save the stream this lesson is playing">
   <svg viewBox="0 0 24 24"><path d="M12 3v10.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4 3.3 3.3V3h2zm-7 16h14v2H5v-2z"/></svg>
@@ -144,6 +151,7 @@
   <button class="batch">Save whole course</button>
   <button class="stop" hidden>Stop batch</button>
   <div class="status"></div>
+  <button class="reload-page" hidden>Reload this lesson page</button>
   <div class="hint">Start the video first. For your own subscribed courses only.</div>
 </div>`;
 
@@ -163,6 +171,7 @@
   const stopBtn = root.querySelector('.stop');
   const statusEl = root.querySelector('.status');
   const closeBtn = root.querySelector('.close');
+  const reloadBtn = root.querySelector('.reload-page');
 
   (document.body || document.documentElement).appendChild(host);
 
@@ -1035,20 +1044,29 @@
     }
   });
   closeBtn.addEventListener('click', () => { panel.hidden = true; });
+  reloadBtn.addEventListener('click', () => { location.reload(); });
 
   // Show English immediately, then let saved preferences replace it.
   renderLanguages(['en']);
-  chrome.storage.sync.get([
-    'resolution', 'downloadVideo', 'downloadSubtitles', 'subtitleLanguages', 'subtitleFormat',
-  ], (s) => {
-    const value = Number(s.resolution == null ? 0 : s.resolution);
-    qualityEl.value = [0, 720, 540, 360].includes(value) ? String(value) : '0';
-    formatEl.value = s.subtitleFormat === 'vtt' ? 'vtt' : 'srt';
-    videoOpt.checked = s.downloadVideo !== false;
-    subsOpt.checked = s.downloadSubtitles !== false;
-    availableLanguages = dedupeList(['en'].concat(s.subtitleLanguages || []));
-    renderLanguages(s.subtitleLanguages || ['en']);
-  });
+  try {
+    chrome.storage.sync.get([
+      'resolution', 'downloadVideo', 'downloadSubtitles', 'subtitleLanguages', 'subtitleFormat',
+    ], (s) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        showContextError();
+        return;
+      }
+      const value = Number(s.resolution == null ? 0 : s.resolution);
+      qualityEl.value = [0, 720, 540, 360].includes(value) ? String(value) : '0';
+      formatEl.value = s.subtitleFormat === 'vtt' ? 'vtt' : 'srt';
+      videoOpt.checked = s.downloadVideo !== false;
+      subsOpt.checked = s.downloadSubtitles !== false;
+      availableLanguages = dedupeList(['en'].concat(s.subtitleLanguages || []));
+      renderLanguages(s.subtitleLanguages || ['en']);
+    });
+  } catch (_) {
+    showContextError();
+  }
   qualityEl.addEventListener('change', () => {
     if (contextLost()) {
       showContextError();
@@ -1180,8 +1198,51 @@
     sendRuntime({ type: 'lls:batch-stop' });
   });
 
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (!msg || msg.type !== 'lls:progress') return;
+  // The service worker cannot reliably call LinkedIn's authenticated GraphQL
+  // endpoint (CORS). Run the request here, in the page's own origin, where the
+  // session cookies apply automatically.
+  async function fetchTranscriptFromPage(courseSlug, videoSlug, identity) {
+    const url = new URL('https://www.linkedin.com/learning-api/graphql');
+    url.searchParams.set('includeWebMetadata', 'true');
+    url.searchParams.set('variables',
+      '(courseSlug:' + courseSlug + ',videoSlug:' + videoSlug + ')');
+    url.searchParams.set('queryId', 'videos.eb0cecfaa25dcd83d23769c32e492c1e');
+    const headers = {
+      'Accept': 'application/vnd.linkedin.normalized+json+2.1',
+      'x-restli-protocol-version': '2.0.0',
+    };
+    const csrf = String(document.cookie || '').match(/(?:^|;\s*)JSESSIONID=["']?([^;"']+)/i);
+    if (csrf) headers['x-csrf-token'] = decodeURIComponent(csrf[1]);
+    if (identity) headers['x-li-identity'] = String(identity);
+    const response = await fetch(url.href, {
+      credentials: 'include',
+      headers: headers,
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  }
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== 'lls:progress') {
+      if (msg && msg.type === 'lls:fetchTranscript') {
+        (async () => {
+          try {
+            const data = await fetchTranscriptFromPage(
+              msg.courseSlug || '', msg.videoSlug || '', msg.identity || ''
+            );
+            sendResponse({ ok: true, data: data });
+          } catch (error) {
+            sendResponse({
+              ok: false,
+              error: error && error.message ? error.message : String(error),
+            });
+          }
+        })();
+        return true;
+      }
+      return;
+    }
     if (msg.requestId && msg.requestId !== activeRequestId) return;
     setStatus(msg.message, msg.state);
   });

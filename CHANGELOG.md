@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.4.5
+- English subtitles now try the lesson page's own authenticated GraphQL endpoint (same-origin, with CSRF token) before giving up, so a captionless lesson can still produce an English transcript.
+- The service worker falls back to its direct fetch only if the page-side request is unavailable.
+- Subtitle failures now report which language was requested and how many other-language caption tracks were captured.
+
+## v2.4.4
+- Added a **Reload this lesson page** button directly in the panel when the extension context is invalidated, so recovery is one click instead of hunting through browser UI.
+- Guarded the initial preference load (`chrome.storage.sync.get`) so a stale page cannot abort the whole content script before the download handlers are registered.
+- Open LinkedIn Learning tabs are now refreshed automatically when the extension is updated/reloaded, preventing stale content scripts from lingering.
+
 ## v2.4.3
 - Fixed an error at `content.js:720` (`chrome.storage.sync.set`) after reloading the extension: the old content script no longer throws when its Chrome APIs are invalidated.
 - The panel now detects an invalidated extension context and shows a clear **reload this lesson page** message instead of silently failing to download.

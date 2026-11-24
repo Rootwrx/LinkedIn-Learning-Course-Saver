@@ -135,6 +135,16 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (prefs.resolution == null) await chrome.storage.sync.set({ resolution: 0 });
   if (!prefs.folderMode) await chrome.storage.sync.set({ folderMode: 'course' });
   if (!prefs.subtitleFormat) await chrome.storage.sync.set({ subtitleFormat: 'srt' });
+
+  // A reloaded extension invalidates already-injected content scripts. Refresh
+  // open lesson tabs so they pick up the new script instead of throwing on
+  // every chrome.* call and refusing to download.
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://www.linkedin.com/learning/*' });
+    for (const tab of tabs) {
+      try { await chrome.tabs.reload(tab.id); } catch (_) { /* tab may have closed */ }
+    }
+  } catch (_) { /* tabs permission unavailable */ }
 });
 
 function safeName(value) {
@@ -692,7 +702,7 @@ function detectCaptionLanguage(text) {
   return '';
 }
 
-async function fetchTranscriptSrt(courseSlug, videoSlug, identity, transcriptLines) {
+async function fetchTranscriptSrt(courseSlug, videoSlug, identity, transcriptLines, tabId) {
   // The lesson page embeds the English transcript in its course data. Prefer
   // that over the GraphQL fallback: it is tied to the exact video and does
   // not depend on a query id that LinkedIn can change.
@@ -706,6 +716,25 @@ async function fetchTranscriptSrt(courseSlug, videoSlug, identity, transcriptLin
     if (srt) return srt;
   }
   if (!courseSlug || !videoSlug) return '';
+
+  // Ask the content script to make the call from the lesson page's own origin.
+  // The worker's cross-origin fetch is often blocked by CORS even with the
+  // session cookies attached.
+  if (tabId != null) {
+    try {
+      const page = await chrome.tabs.sendMessage(tabId, {
+        type: 'lls:fetchTranscript',
+        courseSlug: courseSlug,
+        videoSlug: videoSlug,
+        identity: identity,
+      });
+      if (page && page.ok && page.data) {
+        const lines = findTranscriptLines(page.data);
+        if (lines) return buildTranscriptSrt(lines);
+      }
+    } catch (_) { /* page may not have the handler (old content script) */ }
+  }
+
   const url = new URL('https://www.linkedin.com/learning-api/graphql');
   url.searchParams.set('includeWebMetadata', 'true');
   url.searchParams.set('variables', '(courseSlug:' + courseSlug + ',videoSlug:' + videoSlug + ')');
@@ -779,7 +808,7 @@ async function chooseSubtitleTracks(msg, requestId, tabId) {
   async function transcriptFallback() {
     if (transcriptSrt) return transcriptSrt;
     transcriptSrt = await fetchTranscriptSrt(
-      msg.courseSlug, msg.videoSlug, msg.identity, msg.transcriptLines
+      msg.courseSlug, msg.videoSlug, msg.identity, msg.transcriptLines, tabId
     );
     return transcriptSrt;
   }
@@ -1218,7 +1247,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
           const tracks = await chooseSubtitleTracks(subtitleRequest, msg.requestId, tabId);
           if (!tracks.length) {
-            throw new Error('No subtitle track was available for this lesson. Enable captions in the player and retry.');
+            const wanted = dedupe((msg.subtitleLanguages || ['en']).map((c) => String(c)));
+            const other = (request.captions || []).length +
+              (request.subtitles || []).length + (request.captionTracks || []).length;
+            throw new Error(
+              'No ' + wanted.join('/') + ' subtitle track was available' +
+              (other ? ' (' + other + ' other caption track' + (other === 1 ? '' : 's') +
+                ' captured, in other languages)' : '') +
+              '. Enable captions in the player, wait a few seconds, and retry.'
+            );
           }
           for (const item of tracks) {
             subtitleFiles.push(await downloadSubtitle(item, msg, folderMode, msg.requestId, tabId));

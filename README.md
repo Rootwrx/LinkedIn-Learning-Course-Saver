@@ -12,7 +12,7 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 - If a master playlist is available, picks the preferred quality (highest / 720p / 540p / 360p). If only a single media playlist was captured, it saves that one.
 - Downloads the playlist's parts in the background and assembles one local video file.
 - Downloads the selected subtitle tracks as `.srt` or `.vtt` files (your choice) next to the video: from the player's caption asset, HLS `#EXT-X-MEDIA:TYPE=SUBTITLES` metadata, or LinkedIn's transcript API as a fallback. Subtitles are never saved as `.txt`.
-- Detects caption language from the cue text, so a caption asset without a language hint cannot be saved under the wrong language. English first uses the transcript embedded in the lesson page, then falls back to LinkedIn's transcript endpoint if needed.
+- Detects caption language from the cue text, so a caption asset without a language hint cannot be saved under the wrong language. English first uses the transcript embedded in the lesson page, then asks the page itself for LinkedIn's transcript (same-origin, authenticated), and only then tries the worker's endpoint.
 - Checkboxes let you save **Video**, **Subtitles**, or both. **English** is selected by default; other languages appear when LinkedIn exposes them for the lesson.
 - Names the file `NN - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) and subtitles `NN - <Lesson>.<language>.srt` (or `.vtt`). Lesson titles come from the embedded video metadata when the page exposes a generic heading such as `LinkedIn Learning`. The course name is **not** in the filename — it is the top-level folder.
 - Section folders come from LinkedIn's embedded course outline when available; the visible sidebar headings are used as a fallback. Numbering restarts at `01` inside every section.
@@ -89,7 +89,7 @@ The popup (toolbar icon) holds the preferred quality, default download choices, 
 | Downloaded `.ts` won't play in Windows Media Player | Open it with VLC or mpv, or remux it locally to `.mp4` with ffmpeg. |
 | Saved file has no audio | Some HLS streams split audio into a separate track. This version saves only the video variant. |
 | Download starts but stops | Reload the lesson page to get fresh signed URLs, then retry. |
-| Panel says "reload this lesson page" | You reloaded the extension in `chrome://extensions`. Reload the LinkedIn lesson tab with **F5** so the fresh content script attaches. |
+| Panel says "reload this lesson page" | You reloaded the extension in `chrome://extensions`. Click the **Reload this lesson page** button in the panel (or press **F5**). Open lesson tabs are also refreshed automatically after an extension reload. |
 | Batch says `0 videos found` | Reload the lesson page and reopen the panel. LinkedIn's embedded outline is used first; sidebar links are a fallback. |
 | Only the current video is listed | Reload the lesson page so its embedded course data is available, then reopen the panel. Links with query strings are supported. |
 | Saved subtitles are in the wrong language | Reload the lesson page; caption language is detected from the cue text, including Telugu, Tagalog, Turkish, Serbian, Swedish, and Vietnamese. If no track in the selected language exists, English uses the page's embedded transcript rather than saving the wrong file. |
