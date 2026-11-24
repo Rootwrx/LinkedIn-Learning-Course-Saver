@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.4
+- Fixed a major source of slow saves: when a progressive MP4 was used, the subtitle step still probed up to 10 HLS playlists sequentially. That redundant probe is now skipped.
+- Caption assets and HLS playlist candidates are now fetched in parallel instead of one at a time.
+- Every network probe now has an 8-second timeout, so a single stale signed URL cannot stall a save.
+
 ## v2.5.3
 - Added optional `convert-to-mp4.ps1` / `convert-to-mp4.cmd` helpers that losslessly remux leftover `.ts` files using an ffmpeg already installed on your machine. Nothing is bundled, and subtitles are left untouched.
 

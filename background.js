@@ -485,13 +485,26 @@ function derivePlaylistCandidates(segmentUrls) {
 }
 
 async function fetchText(url) {
-  const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
-  if (!response.ok) {
-    const error = new Error('HTTP ' + response.status);
-    error.status = response.status;
-    throw error;
+  // Signed LinkedIn URLs can hang instead of failing. Bound every probe so a
+  // single dead candidate cannot stall a download for tens of seconds.
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Request timed out')), 8000);
+  });
+  try {
+    const response = await Promise.race([
+      fetch(url, { credentials: 'include', cache: 'no-store' }),
+      timeout,
+    ]);
+    if (!response.ok) {
+      const error = new Error('HTTP ' + response.status);
+      error.status = response.status;
+      throw error;
+    }
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
   }
-  return response.text();
 }
 
 async function choosePlaylist(msg, tabId, requestId) {
@@ -511,26 +524,35 @@ async function choosePlaylist(msg, tabId, requestId) {
   let lastError = null;
   let sawExpired = false;
 
-  for (const url of candidates) {
+  // Probe candidates concurrently. These signed URLs often expire, and
+  // waiting for each one in turn made saves feel much slower than the
+  // connection actually is.
+  const probed = await Promise.all(candidates.map(async (url) => {
     try {
-      const text = await fetchText(url);
-      let playlist;
-      try {
-        playlist = parsePlaylist(text, url);
-      } catch (_) {
-        continue;
-      }
-      if (playlist.subtitles && playlist.subtitles.length) {
-        subtitles = subtitles.concat(playlist.subtitles);
-      }
-      if (playlist.isMaster) {
-        if (!master) master = playlist;
-      } else if (!media && playlist.segments.length) {
-        media = playlist;
-      }
+      return { url: url, text: await fetchText(url) };
     } catch (error) {
-      lastError = error;
-      if (error.status === 401 || error.status === 403) sawExpired = true;
+      return { url: url, error: error };
+    }
+  }));
+  for (const item of probed) {
+    if (item.error) {
+      lastError = item.error;
+      if (item.error.status === 401 || item.error.status === 403) sawExpired = true;
+      continue;
+    }
+    let playlist;
+    try {
+      playlist = parsePlaylist(item.text, item.url);
+    } catch (_) {
+      continue;
+    }
+    if (playlist.subtitles && playlist.subtitles.length) {
+      subtitles = subtitles.concat(playlist.subtitles);
+    }
+    if (playlist.isMaster) {
+      if (!master) master = playlist;
+    } else if (!media && playlist.segments.length) {
+      media = playlist;
     }
   }
 
@@ -827,14 +849,22 @@ async function inspectCaptionCandidates(msg) {
     });
   }
 
-  const byCode = new Map();
-  for (const track of dedupeSubtitleTracks(candidates)) {
-    let text = '';
+  // Fetch caption assets in parallel; LinkedIn lessons can expose a dozen or
+  // more, and doing them one at a time dominated the save time.
+  const unique = dedupeSubtitleTracks(candidates);
+  const fetched = await Promise.all(unique.map(async (track) => {
     try {
-      text = await fetchText(track.url);
+      return { track: track, text: await fetchText(track.url) };
     } catch (_) {
-      continue;
+      return null;
     }
+  }));
+
+  const byCode = new Map();
+  for (const item of fetched) {
+    if (!item) continue;
+    const track = item.track;
+    const text = item.text;
     // A page-provided code comes from LinkedIn's own locale metadata. For
     // every other source, fall back to detection from the cue text.
     const code = (track.kind === 'page' && track.code)
@@ -1335,7 +1365,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       if (downloadSubtitles) {
         try {
-          if (!chosen && request.playlists.length) {
+          // A progressive MP4 is already saved; probing HLS playlists again
+          // here only adds latency. Page caption metadata, captured captions
+          // and the transcript cover the subtitle sources.
+          if (!chosen && !progressive && request.playlists.length) {
             try {
               chosen = await choosePlaylist(request, tabId, msg.requestId);
             } catch (_) {
