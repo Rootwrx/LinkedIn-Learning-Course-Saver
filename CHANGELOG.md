@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.0
+- Videos are now saved as real **`.mp4`** files whenever LinkedIn exposes a signed progressive MP4 in the lesson metadata. No remuxing, transcoding, or extra software is needed.
+- The quality selector picks the closest available progressive resolution; expired signed links are skipped.
+- Falls back to the existing HLS assembly (`.ts`, or `.mp4` for fragmented streams) only when no usable progressive MP4 is present.
+
 ## v2.4.7
 - The subtitle language list in the lesson panel is now scrollable (capped height) instead of pushing the save buttons off-screen when a lesson exposes many caption languages.
 - The panel itself now scrolls if it is taller than the browser window, so every control stays reachable on short screens.

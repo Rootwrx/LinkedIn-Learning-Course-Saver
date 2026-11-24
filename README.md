@@ -10,7 +10,7 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 - Uses `chrome.webRequest` to observe the player's real `dms.licdn.com` HLS playlist and segment URLs, including requests made by HLS workers.
 - Shows a floating **Save lesson** button plus a live "stream detected" indicator.
 - If a master playlist is available, picks the preferred quality (highest / 720p / 540p / 360p). If only a single media playlist was captured, it saves that one.
-- Downloads the playlist's parts in the background and assembles one local video file.
+- Downloads LinkedIn's signed progressive MP4 when available (a real `.mp4`, no conversion), otherwise assembles the playlist's parts in the background into one local video file.
 - Downloads the selected subtitle tracks as `.srt` or `.vtt` files (your choice) next to the video: from the player's caption asset, HLS `#EXT-X-MEDIA:TYPE=SUBTITLES` metadata, or LinkedIn's transcript API as a fallback. Subtitles are never saved as `.txt`.
 - Detects caption language from LinkedIn's own page metadata (authoritative locale codes) first, then from the cue text, so a caption asset without a language hint cannot be saved under the wrong language. English first uses the transcript embedded in the lesson page, then asks the page itself for LinkedIn's transcript (same-origin, authenticated), and only then tries the worker's endpoint.
 - Checkboxes let you save **Video**, **Subtitles**, or both. **English** is selected by default; other languages appear when LinkedIn exposes them for the lesson.
@@ -24,14 +24,16 @@ No signup, credits, accounts, or external servers. Everything runs locally in yo
 
 ### About the file format
 
-LinkedIn serves these lessons as HLS, not as a single progressive MP4. The extension concatenates the stream exactly as the player receives it:
+The extension prefers LinkedIn's own **signed progressive MP4** URLs embedded in the lesson data, so videos are normally saved as real **`.mp4`** files with no remuxing or transcoding. The quality selector picks the closest available resolution; expired links are skipped.
+
+If a lesson does not expose a progressive MP4, it falls back to assembling the HLS stream the player uses:
 
 - **`.ts`** for regular MPEG-TS HLS. Play it with VLC, mpv, or another player that supports transport streams. Windows Media Player may not open it.
-- **`.mp4`** for fragmented HLS containing `#EXT-X-MAP` (an init segment). These are playable in more apps.
+- **`.mp4`** for fragmented HLS containing `#EXT-X-MAP` (an init segment).
 
 LinkedIn's HLS playlists do **not** end in `.m3u8` — they look like `/hls-720p…/<id>/0/<timestamp>`. The extension identifies them by `Content-Type: application/vnd.apple.mpegURL`, not by the URL suffix.
 
-Converting `.ts` to a normal `.mp4` needs a local transcoder/remuxer (for example ffmpeg); that is not bundled in v2.
+Converting a `.ts` fallback to a normal `.mp4` needs a local remuxer (for example ffmpeg); none is bundled.
 
 ## Install (unpacked / developer mode)
 
@@ -52,7 +54,7 @@ If you edit the code later, come back here and click the **reload** icon on the 
 5. Choose a preferred quality (only used when a master playlist is available) and a subtitle format (**SRT** by default, or **VTT**), then click **Save stream**.
 6. Watch the status line for progress. Files land in `Downloads/<Course>/<Section>/` (or flat in `Downloads` if you chose that).
 
-> Timing matters: signed `dms.licdn.com` URLs expire. Click **Save stream** soon after the video starts. If you waited a long time, reload the lesson page and start the video again.
+> Timing matters: signed `dms.licdn.com` and progressive MP4 URLs expire. Click **Save stream** soon after the video starts. If you waited a long time, reload the lesson page and start the video again.
 
 ### Batch download a whole course
 

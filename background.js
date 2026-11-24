@@ -402,6 +402,30 @@ function pickVariant(variants, wanted) {
   return pool.slice().sort((a, b) => (b.height - a.height) || (b.bandwidth - a.bandwidth))[0];
 }
 
+function pickProgressiveStream(streams, wanted) {
+  const now = Date.now();
+  const valid = (streams || []).filter((stream) => stream &&
+    /^https:\/\/(?:www\.)?linkedin\.com\/dms\//i.test(String(stream.url || '')) &&
+    (!stream.expiresAt || Number(stream.expiresAt) > now)
+  );
+  if (!valid.length) return null;
+  const withHeight = valid.filter((stream) => Number(stream.height) > 0);
+  const pool = withHeight.length ? withHeight : valid;
+  const height = (stream) => Number(stream.height) || 0;
+
+  if (wanted > 0) {
+    const exact = pool.filter((stream) => height(stream) === wanted);
+    if (exact.length) return exact.sort((a, b) => Number(b.size || 0) - Number(a.size || 0))[0];
+    if (withHeight.length) {
+      return pool.slice().sort((a, b) => {
+        const delta = Math.abs(height(a) - wanted) - Math.abs(height(b) - wanted);
+        return delta || (Number(b.size || 0) - Number(a.size || 0));
+      })[0];
+    }
+  }
+  return pool.slice().sort((a, b) => height(b) - height(a))[0];
+}
+
 function derivePlaylistCandidates(segmentUrls) {
   const out = [];
   for (const raw of segmentUrls.slice(0, 6)) {
@@ -1207,49 +1231,69 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       let subtitleError = '';
 
       if (downloadVideo) {
-        notify(tabId, msg.requestId, 'Reading captured stream…');
-        chosen = await choosePlaylist(request, tabId, msg.requestId);
-        const playlist = chosen.playlist;
-        resolution = chosen.resolution || detectResolution(playlist.url);
+        // Prefer LinkedIn's signed progressive MP4 from the lesson metadata.
+        // It is a genuine .mp4 — no remuxing or transcoding required. Fall
+        // back to assembling the captured HLS stream when it is unavailable
+        // or has expired.
+        const progressive = pickProgressiveStream(
+          msg.progressiveStreams, Number(msg.resolution) || 0
+        );
+        if (progressive) {
+          extension = 'mp4';
+          resolution = progressive.height ? progressive.height + 'p' : '';
+          filename = buildFilename(msg, extension, folderMode);
+          notify(tabId, msg.requestId,
+            'Downloading ' + (resolution ? resolution + ' ' : '') + 'MP4…');
+          downloadId = await chrome.downloads.download({
+            url: progressive.url,
+            filename: filename,
+            conflictAction: 'uniquify',
+          });
+        } else {
+          notify(tabId, msg.requestId, 'Reading captured stream…');
+          chosen = await choosePlaylist(request, tabId, msg.requestId);
+          const playlist = chosen.playlist;
+          resolution = chosen.resolution || detectResolution(playlist.url);
 
-        if (playlist.encrypted) {
-          throw new Error('This lesson stream is encrypted and cannot be saved locally by this extension.');
+          if (playlist.encrypted) {
+            throw new Error('This lesson stream is encrypted and cannot be saved locally by this extension.');
+          }
+          if (playlist.byteRange) {
+            throw new Error('This lesson uses byte-range segments, which this extension does not support yet.');
+          }
+
+          extension = playlist.mapUri ? 'mp4' : 'ts';
+          const mime = extension === 'mp4' ? 'video/mp4' : 'video/mp2t';
+          const urls = (playlist.mapUri ? [playlist.mapUri] : []).concat(playlist.segments);
+          if (!urls.length) {
+            throw new Error('The captured playlist contains no video segments.');
+          }
+
+          filename = buildFilename(msg, extension, folderMode);
+          notify(tabId, msg.requestId,
+            'Found ' + (resolution ? resolution + ' ' : '') + 'stream. Fetching ' + urls.length + ' parts…');
+
+          await ensureOffscreen();
+          const assembled = await chrome.runtime.sendMessage({
+            type: 'lls:assemble',
+            requestId: msg.requestId,
+            tabId: tabId,
+            urls: urls,
+            filename: filename,
+            mime: mime,
+          });
+          if (!assembled || !assembled.ok) {
+            throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
+          }
+
+          notify(tabId, msg.requestId, 'Starting video download…');
+          downloadId = await chrome.downloads.download({
+            url: assembled.blobUrl,
+            filename: filename,
+            conflictAction: 'uniquify',
+          });
+          bytes = assembled.bytes;
         }
-        if (playlist.byteRange) {
-          throw new Error('This lesson uses byte-range segments, which this extension does not support yet.');
-        }
-
-        extension = playlist.mapUri ? 'mp4' : 'ts';
-        const mime = extension === 'mp4' ? 'video/mp4' : 'video/mp2t';
-        const urls = (playlist.mapUri ? [playlist.mapUri] : []).concat(playlist.segments);
-        if (!urls.length) {
-          throw new Error('The captured playlist contains no video segments.');
-        }
-
-        filename = buildFilename(msg, extension, folderMode);
-        notify(tabId, msg.requestId,
-          'Found ' + (resolution ? resolution + ' ' : '') + 'stream. Fetching ' + urls.length + ' parts…');
-
-        await ensureOffscreen();
-        const assembled = await chrome.runtime.sendMessage({
-          type: 'lls:assemble',
-          requestId: msg.requestId,
-          tabId: tabId,
-          urls: urls,
-          filename: filename,
-          mime: mime,
-        });
-        if (!assembled || !assembled.ok) {
-          throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
-        }
-
-        notify(tabId, msg.requestId, 'Starting video download…');
-        downloadId = await chrome.downloads.download({
-          url: assembled.blobUrl,
-          filename: filename,
-          conflictAction: 'uniquify',
-        });
-        bytes = assembled.bytes;
       }
 
       if (downloadSubtitles) {
