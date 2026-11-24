@@ -1,6 +1,6 @@
 # LinkedIn Learning Video Saver
 
-A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button to LinkedIn Learning lesson pages. Instead of calling LinkedIn's old `learning-api/detailedCourses` endpoint (which now rejects the request), it captures the HLS stream the lesson player already fetches and saves that stream locally.
+A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button to LinkedIn Learning lesson pages. Instead of calling LinkedIn's old `learning-api/detailedCourses` endpoint (which now rejects the request), it captures the HLS stream the lesson player already fetches and saves the video and selected subtitles locally.
 
 > Use this only for courses you are entitled to access (your own subscription / licence). Respect LinkedIn's terms and the course author's copyright — saved copies are for personal offline use.
 
@@ -11,9 +11,11 @@ A small Chrome/Edge (Manifest V3) extension that adds a **Save lesson** button t
 - Shows a floating **Save lesson** button plus a live "stream detected" indicator.
 - If a master playlist is available, picks the preferred quality (highest / 720p / 540p / 360p). If only a single media playlist was captured, it saves that one.
 - Downloads the playlist's parts in the background and assembles one local video file.
-- Names the file `<Course> - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) into a per-course folder by default.
+- Downloads the selected subtitle tracks as `.srt` files next to the video: from the player's caption asset, HLS `#EXT-X-MEDIA:TYPE=SUBTITLES` metadata, or LinkedIn's transcript API as a fallback.
+- Checkboxes let you save **Video**, **Subtitles**, or both. **English** is selected by default; other languages appear when LinkedIn exposes them for the lesson.
+- Names the file `<Course> - <Lesson>.ts` (or `.mp4` when the stream is fragmented MP4) and subtitles `<Course> - <Lesson>.<language>.srt` into a per-course folder by default.
 - Works on single-page navigations — the button follows the current lesson without a reload.
-- **Batch mode:** **Save whole course** walks every lesson link in the current course playlist, auto-plays each lesson muted to capture its stream, saves them in order, then returns to the lesson you started from.
+- **Batch mode:** **Save whole course** walks every lesson link in the current course playlist, auto-plays each lesson muted to capture its stream, saves the selected files in order, then returns to the lesson you started from.
 
 No signup, credits, accounts, or external servers. Everything runs locally in your browser.
 
@@ -43,8 +45,9 @@ If you edit the code later, come back here and click the **reload** icon on the 
 1. Sign in to LinkedIn Learning with your paid subscription.
 2. Open a lesson you can play and **let the video start** — the player must fetch its HLS playlist before the button can save anything.
 3. Click **Save lesson** in the bottom-right. The panel shows what was detected, for example `Stream detected (720p): 2 playlists ready.`
-4. Choose a preferred quality (only used when a master playlist is available), then click **Save stream**.
-5. Watch the status line for progress. The file lands in your Downloads folder (or a subfolder named after the course).
+4. Under **Download**, keep **Video** and/or **Subtitles** checked. English is checked by default; check any additional languages LinkedIn lists for that lesson.
+5. Choose a preferred quality (only used when a master playlist is available), then click **Save stream**.
+6. Watch the status line for progress. Files land in your Downloads folder (or a subfolder named after the course).
 
 > Timing matters: signed `dms.licdn.com` URLs expire. Click **Save stream** soon after the video starts. If you waited a long time, reload the lesson page and start the video again.
 
@@ -56,12 +59,13 @@ If you edit the code later, come back here and click the **reload** icon on the 
 4. Use **Stop batch** at any time to cancel and return to the original lesson.
 5. When it finishes, the status shows `Batch complete: X saved, Y failed` and the tab returns to where you started.
 
-Batch files are prefixed in playlist order (`01 - …`, `02 - …`) so they stay sorted in the course folder.
+Batch files are prefixed in playlist order (`01 - …`, `02 - …`) so they stay sorted in the course folder. Subtitle-only batches wait briefly for the player to expose a caption track before saving.
 
-The popup (toolbar icon) holds the preferred quality and the save-structure setting.
+The popup (toolbar icon) holds the preferred quality, default download choices, and save-structure setting.
 
 ## Optional: change settings via popup
 
+- **Download by default** – Video and Subtitles (English). These are pre-checked on lesson pages too.
 - **Preferred quality** – highest available, or 720p / 540p / 360p when the master playlist lists variants.
 - **Save structure** – one folder per course, or everything flat in `Downloads`.
 
@@ -69,11 +73,12 @@ The popup (toolbar icon) holds the preferred quality and the save-structure sett
 
 | Symptom | Fix |
 | --- | --- |
-| "No stream captured yet" | Start the video and wait a few seconds. The button only sees URLs the player actually requests. |
+| "No stream captured yet" | Start the video and wait a few seconds. The button only sees URLs the player actually requests. Subtitles-only still needs the player to load so it can expose its caption track. |
 | "Stream detected" but save says the URL expired | Reload the lesson page, start the video again, and click Save immediately. |
 | "Could not open the captured playlist" | The player may use a different request mechanism. Reload the page while signed in, play for a few seconds, then retry. |
 | "This lesson stream is encrypted" | LinkedIn enabled HLS encryption for that asset; local saving is not supported. |
 | "byte-range segments" | This playlist style is not supported yet. Try another lesson or a future version. |
+| "No subtitle track was available" | Play the lesson with captions turned on, wait a few seconds, then retry. If LinkedIn exposes only a transcript, the extension builds an `.srt` from it. |
 | Button doesn't appear | Make sure the URL is `www.linkedin.com/learning/<course>/<lesson>` and that you're on the main frame, not an embedded preview. |
 | Downloaded `.ts` won't play in Windows Media Player | Open it with VLC or mpv, or remux it locally to `.mp4` with ffmpeg. |
 | Saved file has no audio | Some HLS streams split audio into a separate track. This version saves only the video variant. |
@@ -86,14 +91,13 @@ The popup (toolbar icon) holds the preferred quality and the save-structure sett
 | File | Purpose |
 | --- | --- |
 | `manifest.json` | MV3 manifest: permissions, host access, content script, background worker. |
-| `background.js` | `webRequest` listener records the player's real HLS URLs per tab, fetches/parses playlists, picks the requested quality, and delegates assembly to the offscreen document. |
-| `content.js` | Injects the shadow-DOM button/panel, collects course lesson links, drives batch playback, asks for captured URLs, and sends save requests. |
-| `offscreen.html` / `offscreen.js` | Hidden DOM context that fetches the segments and creates the blob URL. Offscreen documents only expose `chrome.runtime`, so the service worker starts the download. |
+| `background.js` | `webRequest` listener records the player's real HLS/caption URLs per tab, fetches/parses playlists and subtitle tracks, picks the requested quality/languages, and delegates assembly to the offscreen document. |
+| `content.js` | Injects the shadow-DOM button/panel and download/language checkboxes, collects course lesson links, drives batch playback, asks for captured URLs, and sends save requests. |
+| `offscreen.html` / `offscreen.js` | Hidden DOM context that fetches the segments or subtitle text and creates the blob URL. Offscreen documents only expose `chrome.runtime`, so the service worker starts the download. |
 | `popup.html` / `popup.js` | Toolbar settings. |
 | `icons/` | Extension icons (regenerate with `tools/make-icons.ps1`). |
 
 ## Roadmap (not in v2)
 
 - Optional local `.ts` → `.mp4` remux/transcode.
-- Captions / transcripts as `.srt`.
 - Exercise files and a per-course manifest.

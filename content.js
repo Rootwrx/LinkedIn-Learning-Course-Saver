@@ -9,7 +9,10 @@
   let seq = 0;
   let activeRequestId = null;
   let captures = [];
+  let availableLanguages = ['en'];
+  let pageIdentity = '';
   let batchState = null;
+  let activeBatchKey = '';
   let playTimer = null;
   let batchTimer = null;
 
@@ -64,6 +67,15 @@
     border-radius: 6px; background: #b91c1c; color: #fff;
     font-weight: 600; cursor: pointer; font-size: 12px;
   }
+  .options {
+    margin: 0 0 12px; padding: 10px; border: 1px solid #e5e7eb;
+    border-radius: 6px; background: #fafafa;
+  }
+  .options-title { margin: 0 0 7px; font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+  .check { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; font-size: 12px; font-weight: 500; color: #374151; cursor: pointer; }
+  .check input { width: 14px; height: 14px; margin: 0; accent-color: #0a66c2; }
+  .langs { margin: 8px 0 0 21px; padding-top: 8px; border-top: 1px dashed #d1d5db; }
+  .langs:empty { display: none; }
   .status { margin-top: 10px; font-size: 12px; line-height: 1.45; color: #4b5563; }
   .status.error { color: #b91c1c; }
   .status.ok { color: #047857; }
@@ -84,6 +96,12 @@
   <p class="meta">LinkedIn Learning</p>
   <p class="stream">Waiting for the player…</p>
   <p class="course">Course playlist: scanning…</p>
+  <div class="options">
+    <p class="options-title">Download</p>
+    <label class="check"><input type="checkbox" class="opt-video" checked> Video</label>
+    <label class="check"><input type="checkbox" class="opt-subs" checked> Subtitles</label>
+    <div class="langs"></div>
+  </div>
   <label for="q">Preferred quality (master playlist only)</label>
   <select id="q">
     <option value="0">Highest available</option>
@@ -104,6 +122,9 @@
   const metaEl = root.querySelector('.meta');
   const streamEl = root.querySelector('.stream');
   const courseEl = root.querySelector('.course');
+  const videoOpt = root.querySelector('.opt-video');
+  const subsOpt = root.querySelector('.opt-subs');
+  const langsEl = root.querySelector('.langs');
   const qualityEl = root.querySelector('#q');
   const dlBtn = root.querySelector('.dl');
   const batchBtn = root.querySelector('.batch');
@@ -125,6 +146,12 @@
           captures = [];
         } else if (resp && resp.ok) {
           captures = resp.items || [];
+          const languages = dedupeList(['en'].concat(resp.languages || []));
+          if (languages.join('|') !== availableLanguages.join('|')) {
+            const previous = downloadOptions().subtitleLanguages;
+            availableLanguages = languages;
+            renderLanguages(previous);
+          }
         }
         updateStreamStatus();
         if (callback) callback();
@@ -215,6 +242,81 @@
     courseEl.textContent = 'Course playlist: ' + count + ' lesson' + (count === 1 ? '' : 's') + ' found.';
   }
 
+  const LANG_LABELS = {
+    en: 'English', fr: 'French', de: 'German', es: 'Spanish', it: 'Italian',
+    pt: 'Portuguese', nl: 'Dutch', sv: 'Swedish', da: 'Danish', no: 'Norwegian',
+    fi: 'Finnish', pl: 'Polish', ru: 'Russian', tr: 'Turkish', ja: 'Japanese',
+    ko: 'Korean', zh: 'Chinese', ar: 'Arabic', hi: 'Hindi', id: 'Indonesian',
+    vi: 'Vietnamese', th: 'Thai', cs: 'Czech', el: 'Greek', he: 'Hebrew',
+    ro: 'Romanian', uk: 'Ukrainian',
+  };
+
+  function dedupeList(list) {
+    const seen = new Set();
+    const out = [];
+    for (const value of list || []) {
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  }
+
+  function downloadOptions() {
+    return {
+      downloadVideo: videoOpt.checked,
+      downloadSubtitles: subsOpt.checked,
+      subtitleLanguages: Array.from(langsEl.querySelectorAll('input:checked'))
+        .map((input) => input.value),
+    };
+  }
+
+  function renderLanguages(preferred) {
+    const codes = dedupeList(['en'].concat(availableLanguages || []));
+    const checked = new Set(preferred && preferred.length ? preferred : ['en']);
+    langsEl.textContent = '';
+    codes.forEach((code) => {
+      const label = document.createElement('label');
+      label.className = 'check';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = code;
+      input.checked = checked.has(code);
+      input.addEventListener('change', savePrefs);
+      label.appendChild(input);
+      label.appendChild(document.createTextNode(' ' + (LANG_LABELS[code] || code)));
+      langsEl.appendChild(label);
+    });
+  }
+
+  function savePrefs() {
+    const options = downloadOptions();
+    chrome.storage.sync.set({
+      downloadVideo: options.downloadVideo,
+      downloadSubtitles: options.downloadSubtitles,
+      subtitleLanguages: options.subtitleLanguages,
+    });
+  }
+
+  function extractIdentity() {
+    let decoded = '';
+    try {
+      const decoder = document.createElement('textarea');
+      decoder.innerHTML = document.documentElement.outerHTML;
+      decoded = decoder.value;
+    } catch (_) {
+      decoded = document.documentElement.outerHTML;
+    }
+    let match = decoded.match(/"enterpriseProfileHash"\s*:\s*"([^"]+)"/i) ||
+      decoded.match(/enterpriseProfileHash[^A-Za-z0-9+/=_-]{0,24}([A-Za-z0-9+/=_-]{20,})/i);
+    if (match) return match[1];
+    match = decoded.match(/"enterpriseProfile"\s*:\s*"(urn:li:enterpriseProfile:[^"\\]+)"/i);
+    if (match) {
+      try { return btoa(match[1]); } catch (_) { return ''; }
+    }
+    return '';
+  }
+
   function sendRuntime(message, callback) {
     try {
       chrome.runtime.sendMessage(message, (resp) => {
@@ -274,6 +376,7 @@
     stopBtn.hidden = true;
     dlBtn.disabled = false;
     batchBtn.disabled = false;
+    activeBatchKey = '';
   }
 
   function sendBatchDownload(batch, lesson) {
@@ -290,18 +393,30 @@
       title: lesson.title || (current && current.title) || 'lesson',
       courseTitle: batch.courseTitle || (current && current.courseTitle) || '',
       courseSlug: batch.courseSlug || (current && current.courseSlug) || '',
+      videoSlug: lesson.slug || (current && current.videoSlug) || '',
       resolution: batch.resolution || Number(qualityEl.value) || 0,
+      identity: batch.identity || pageIdentity,
+      downloadVideo: batch.downloadVideo !== false,
+      downloadSubtitles: !!batch.downloadSubtitles,
+      subtitleLanguages: (batch.subtitleLanguages || []).slice(),
     }, (resp) => {
       activeRequestId = null;
       if (!resp || !resp.ok) {
         setStatus('Batch lesson failed: ' + ((resp && resp.error) || 'unknown error'), 'error');
       } else {
-        setStatus('Batch saved: ' + resp.filename, 'ok');
+        const saved = resp.filename || (resp.subtitleFiles || [])
+          .map((file) => file.label).join(', ') || 'lesson';
+        setStatus('Batch saved: ' + saved + (resp.subtitleError ? ' (' + resp.subtitleError + ')' : ''),
+          resp.subtitleError ? 'working' : 'ok');
       }
     });
   }
 
   function runBatchLesson(batch) {
+    const batchKey = batch.tabId + ':' + batch.index + ':' + batch.startedAt;
+    if (activeBatchKey === batchKey) return;
+    activeBatchKey = batchKey;
+
     batchState = batch;
     stopBtn.hidden = false;
     dlBtn.disabled = true;
@@ -312,6 +427,26 @@
     metaEl.textContent = batch.courseTitle || (current && current.courseTitle) || 'LinkedIn Learning';
     setStatus('Batch ' + (batch.index + 1) + '/' + batch.lessons.length + ': ' + lesson.title, 'working');
     startAutoPlay();
+
+    if (batch.downloadVideo === false) {
+      // Subtitle-only batches still need the player to load, so wait for a
+      // caption asset (or fall back to the transcript API after a short wait).
+      const captionStarted = Date.now();
+      const captionTimer = setInterval(() => {
+        if (batchState !== batch || !batch.active) {
+          clearInterval(captionTimer);
+          return;
+        }
+        requestCaptures(() => {
+          const ready = captures.some((item) => item.kind === 'caption');
+          if (!ready && Date.now() - captionStarted < 6000) return;
+          clearInterval(captionTimer);
+          stopAutoPlay();
+          if (batchState === batch) sendBatchDownload(batch, lesson);
+        });
+      }, 1000);
+      return;
+    }
 
     const started = Date.now();
     if (batchTimer) clearInterval(batchTimer);
@@ -387,6 +522,7 @@
     lastHref = location.href;
     captures = [];
     current = readPage();
+    pageIdentity = extractIdentity();
 
     try {
       chrome.runtime.sendMessage({ type: 'lls:page', url: location.href }, () => {
@@ -421,13 +557,23 @@
   });
   closeBtn.addEventListener('click', () => { panel.hidden = true; });
 
-  chrome.storage.sync.get(['resolution'], (s) => {
+  // Show English immediately, then let saved preferences replace it.
+  renderLanguages(['en']);
+  chrome.storage.sync.get([
+    'resolution', 'downloadVideo', 'downloadSubtitles', 'subtitleLanguages',
+  ], (s) => {
     const value = Number(s.resolution == null ? 0 : s.resolution);
     qualityEl.value = [0, 720, 540, 360].includes(value) ? String(value) : '0';
+    videoOpt.checked = s.downloadVideo !== false;
+    subsOpt.checked = s.downloadSubtitles !== false;
+    availableLanguages = dedupeList(['en'].concat(s.subtitleLanguages || []));
+    renderLanguages(s.subtitleLanguages || ['en']);
   });
   qualityEl.addEventListener('change', () => {
     chrome.storage.sync.set({ resolution: Number(qualityEl.value) });
   });
+  videoOpt.addEventListener('change', savePrefs);
+  subsOpt.addEventListener('change', savePrefs);
 
   dlBtn.addEventListener('click', () => {
     if (!current || (batchState && batchState.active)) return;
@@ -439,14 +585,21 @@
 
     requestCaptures(() => {
       const info = streamInfo();
-      if (!info.playlists.length && !info.segments.length) {
+      const options = downloadOptions();
+      if (!options.downloadVideo && !options.downloadSubtitles) {
+        dlBtn.disabled = false;
+        activeRequestId = null;
+        setStatus('Select Video or Subtitles to download.', 'error');
+        return;
+      }
+      if (options.downloadVideo && !info.playlists.length && !info.segments.length) {
         dlBtn.disabled = false;
         activeRequestId = null;
         setStatus('No stream captured yet. Start the video, wait a few seconds, then try again.', 'error');
         return;
       }
 
-      chrome.runtime.sendMessage({
+      chrome.runtime.sendMessage(Object.assign({
         type: 'lls:download',
         requestId: requestId,
         title: current.title,
@@ -454,7 +607,8 @@
         courseSlug: current.courseSlug,
         videoSlug: current.videoSlug,
         resolution: Number(qualityEl.value) || 0,
-      }, (resp) => {
+        identity: pageIdentity,
+      }, options), (resp) => {
         dlBtn.disabled = false;
         activeRequestId = null;
         if (chrome.runtime.lastError) {
@@ -462,8 +616,17 @@
           return;
         }
         if (resp && resp.ok) {
-          const res = resp.resolution ? ' (' + resp.resolution + ')' : '';
-          setStatus('Saved ' + String(resp.ext || 'video').toUpperCase() + res + ': ' + resp.filename, 'ok');
+          const parts = [];
+          if (resp.filename) {
+            parts.push('Saved ' + String(resp.ext || 'video').toUpperCase() +
+              (resp.resolution ? ' (' + resp.resolution + ')' : '') + ': ' + resp.filename);
+          }
+          if (resp.subtitleFiles && resp.subtitleFiles.length) {
+            parts.push('Subtitles: ' + resp.subtitleFiles
+              .map((file) => file.label).join(', '));
+          }
+          if (resp.subtitleError) parts.push('Subtitle warning: ' + resp.subtitleError);
+          setStatus(parts.join(' · ') || 'Saved.', resp.subtitleError ? 'working' : 'ok');
         } else {
           setStatus((resp && resp.error) || 'Download failed.', 'error');
         }
@@ -488,6 +651,10 @@
       courseTitle: current.courseTitle,
       returnUrl: location.href,
       resolution: Number(qualityEl.value) || 0,
+      identity: pageIdentity,
+      downloadVideo: videoOpt.checked,
+      downloadSubtitles: subsOpt.checked,
+      subtitleLanguages: downloadOptions().subtitleLanguages,
     }, (resp) => {
       batchBtn.disabled = false;
       if (!resp || !resp.ok) {

@@ -11,6 +11,8 @@
     .sub { margin: 2px 0 0; color: #6b7280; font-size: 11px; }
     label { display: block; font-weight: 600; margin: 12px 0 5px; font-size: 12px; }
     select { width: 100%; padding: 7px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; font-size: 12px; }
+    .check { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 12px; font-weight: 500; }
+    .check input { width: 14px; height: 14px; margin: 0; accent-color: #0a66c2; }
     a { display: block; margin-top: 16px; padding: 9px; text-align: center; border-radius: 6px; background: #0a66c2; color: #fff; text-decoration: none; font-weight: 600; }
     a:hover { background: #004182; }
     .note { margin: 12px 0 0; color: #9ca3af; font-size: 10px; }
@@ -33,6 +35,10 @@
     <option value="540">540p</option>
     <option value="360">360p</option>
   </select>
+
+  <label>Download by default</label>
+  <label class="check"><input type="checkbox" id="video"> Video</label>
+  <label class="check"><input type="checkbox" id="subs"> Subtitles (English by default)</label>
 
   <label for="folder">Save structure</label>
   <select id="folder">

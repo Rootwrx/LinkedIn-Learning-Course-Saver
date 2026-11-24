@@ -7,6 +7,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== 'lls:assemble') return false;
 
   (async () => {
+    if (typeof msg.text === 'string') {
+      try {
+        const blob = new Blob([msg.text], { type: msg.mime || 'text/plain' });
+        const blobUrl = URL.createObjectURL(blob);
+        setTimeout(() => {
+          try { URL.revokeObjectURL(blobUrl); } catch (_) { /* already gone */ }
+        }, 60000);
+        sendResponse({ ok: true, blobUrl: blobUrl, bytes: blob.size });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error && error.message ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
     const urls = Array.isArray(msg.urls) ? msg.urls : [];
     if (!urls.length) {
       sendResponse({ ok: false, error: 'No stream parts were provided.' });

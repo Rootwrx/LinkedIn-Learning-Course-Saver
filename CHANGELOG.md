@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.2.0
+- Added subtitle downloads as `.srt`, with **Video** and **Subtitles** checkboxes in the lesson panel and toolbar popup.
+- English is selected by default; any additional languages exposed by the player or HLS playlist appear as checkboxes.
+- Captures LinkedIn's `video-auto-caption-srt-acs-singleton` assets without treating them as HLS playlists or segments.
+- Reads `#EXT-X-MEDIA:TYPE=SUBTITLES` tracks and falls back to LinkedIn's transcript API for English when no caption file is available.
+- Subtitle choices are saved in `chrome.storage.sync` and carried through single-lesson and whole-course batch downloads.
+- Subtitle-only batches wait briefly for the player's caption track before saving.
+
 ## v2.1.0
 - Added **Save whole course** batch mode: walks every lesson link found in the current course playlist.
 - Batch state is stored in `chrome.storage.session`, so it survives navigation and service-worker restarts.
