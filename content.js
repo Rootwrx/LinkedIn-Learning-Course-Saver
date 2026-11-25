@@ -931,7 +931,7 @@
   function startAutoPlay() {
     if (playTimer) return;
     tryAutoPlay();
-    playTimer = setInterval(tryAutoPlay, 900);
+    playTimer = setInterval(tryAutoPlay, 300);
   }
 
   function stopAutoPlay() {
@@ -980,7 +980,7 @@
       } else {
         const saved = resp.filename || (resp.subtitleFiles || [])
           .map((file) => file.label).join(', ') || 'lesson';
-        setStatus('Batch saved: ' + saved + (resp.subtitleError ? ' (' + resp.subtitleError + ')' : ''),
+        setStatus((resp.queued ? 'Batch downloading in background: ' : 'Batch saved: ') + saved + (resp.subtitleError ? ' (' + resp.subtitleError + ')' : ''),
           resp.subtitleError ? 'working' : 'ok');
       }
     });
@@ -1018,7 +1018,7 @@
           stopAutoPlay();
           if (batchState === batch) sendBatchDownload(batch, lesson);
         });
-      }, 1000);
+      }, 250);
       return;
     }
 
@@ -1043,7 +1043,7 @@
           });
         }
       });
-    }, 1000);
+    }, 250);
   }
 
   function checkBatchState() {

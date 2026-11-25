@@ -465,6 +465,38 @@ async function fetchText(url) {
   }
 }
 
+// Probe playlists concurrently, but do not wait for a hung candidate: once one
+// probe has succeeded, give the others a short grace period and carry on.
+// Results keep candidate order so master/media selection stays deterministic.
+function probeCandidates(candidates) {
+  return new Promise((resolve) => {
+    const results = new Array(candidates.length);
+    let settled = 0;
+    let finished = false;
+    let graceTimer = null;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(graceTimer);
+      resolve(results.filter(Boolean));
+    }
+    candidates.forEach((url, index) => {
+      fetchText(url)
+        .then((text) => ({ url: url, text: text }), (error) => ({ url: url, error: error }))
+        .then((item) => {
+          if (finished) return;
+          results[index] = item;
+          settled++;
+          if (settled === candidates.length) {
+            finish();
+          } else if (!item.error && !graceTimer) {
+            graceTimer = setTimeout(finish, 400);
+          }
+        });
+    });
+  });
+}
+
 async function choosePlaylist(msg, tabId, requestId) {
   const provided = dedupe((msg.playlists || []).filter(isLicdn)).slice(0, MAX_CANDIDATES);
   // Only guess from segments when no real playlist/candidate was observed;
@@ -485,13 +517,7 @@ async function choosePlaylist(msg, tabId, requestId) {
   // Probe candidates concurrently. These signed URLs often expire, and
   // waiting for each one in turn made saves feel much slower than the
   // connection actually is.
-  const probed = await Promise.all(candidates.map(async (url) => {
-    try {
-      return { url: url, text: await fetchText(url) };
-    } catch (error) {
-      return { url: url, error: error };
-    }
-  }));
+  const probed = await probeCandidates(candidates);
   for (const item of probed) {
     if (item.error) {
       lastError = item.error;
@@ -1021,42 +1047,109 @@ async function goToBatchLesson(batch, tabId) {
   }
 }
 
+// Batch state lives in storage.session. Video jobs now finish in the background
+// while the tab moves on, so every read-modify-write goes through one lock.
+let batchLockChain = Promise.resolve();
+function withBatchLock(fn) {
+  const run = batchLockChain.then(fn);
+  batchLockChain = run.catch(() => {});
+  return run;
+}
+
+// Limit simultaneous video downloads so a fast batch cannot pile up memory.
+const MAX_PARALLEL_VIDEO_JOBS = 3;
+let activeVideoJobs = 0;
+const videoSlotWaiters = [];
+function acquireVideoSlot() {
+  if (activeVideoJobs < MAX_PARALLEL_VIDEO_JOBS) {
+    activeVideoJobs++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => videoSlotWaiters.push(resolve));
+}
+function releaseVideoSlot() {
+  const next = videoSlotWaiters.shift();
+  if (next) next();
+  else activeVideoJobs--;
+}
+
+const pendingBatchJobs = new Map(); // tabId -> Set<Promise>
+function trackBatchJob(tabId, promise) {
+  let set = pendingBatchJobs.get(tabId);
+  if (!set) {
+    set = new Set();
+    pendingBatchJobs.set(tabId, set);
+  }
+  set.add(promise);
+  promise.then(() => set.delete(promise), () => set.delete(promise));
+}
+async function waitForBatchJobs(tabId) {
+  const set = pendingBatchJobs.get(tabId);
+  while (set && set.size) {
+    await Promise.all(Array.from(set));
+  }
+}
+
 async function finishBatch(tabId) {
-  const batch = await getBatch();
-  if (!batch || !batch.active || batch.tabId !== tabId) return;
+  const done = await withBatchLock(async () => {
+    const batch = await getBatch();
+    if (!batch || !batch.active || batch.tabId !== tabId) return null;
+    batch.active = false;
+    batch.status = 'done';
+    batch.finishedAt = Date.now();
+    await setBatch(batch);
+    return batch;
+  });
+  if (!done) return;
 
-  batch.active = false;
-  batch.status = 'done';
-  batch.finishedAt = Date.now();
-  await setBatch(batch);
-
-  notify(tabId, null, 'Batch complete: ' + batchSummary(batch) + '.', 'ok');
-  if (batch.returnUrl) {
+  notify(tabId, null, 'Batch complete: ' + batchSummary(done) + '.', 'ok');
+  if (done.returnUrl) {
     try {
-      await chrome.tabs.update(tabId, { url: batch.returnUrl });
+      await chrome.tabs.update(tabId, { url: done.returnUrl });
     } catch (_) {
       /* tab may have been closed */
     }
   }
 }
 
-async function recordBatchResult(tabId, result) {
-  const batch = await getBatch();
-  if (!batch || !batch.active || batch.tabId !== tabId) return;
+// Store a lesson's outcome without moving the batch forward.
+function recordBatchResult(tabId, result) {
+  return withBatchLock(async () => {
+    const batch = await getBatch();
+    if (!batch || !batch.active || batch.tabId !== tabId) return;
+    batch.results = batch.results || [];
+    batch.results.push(result);
+    await setBatch(batch);
+  });
+}
 
-  batch.results = batch.results || [];
-  batch.results.push(result);
-  await setBatch(batch);
+// Move to the next lesson (or finish once every background job is done).
+async function advanceBatch(tabId) {
+  const move = await withBatchLock(async () => {
+    const batch = await getBatch();
+    if (!batch || !batch.active || batch.tabId !== tabId) return null;
+    const next = batch.index + 1;
+    if (next >= batch.lessons.length) return { finish: true };
+    batch.index = next;
+    await setBatch(batch);
+    return { batch: batch };
+  });
+  if (!move) return;
 
-  const next = batch.index + 1;
-  if (next >= batch.lessons.length) {
+  if (move.finish) {
+    if ((pendingBatchJobs.get(tabId) || { size: 0 }).size) {
+      notify(tabId, null, 'Finishing downloads…', 'working');
+    }
+    await waitForBatchJobs(tabId);
     await finishBatch(tabId);
     return;
   }
+  await goToBatchLesson(move.batch, tabId);
+}
 
-  batch.index = next;
-  await setBatch(batch);
-  await goToBatchLesson(batch, tabId);
+async function recordAndAdvance(tabId, result) {
+  await recordBatchResult(tabId, result);
+  await advanceBatch(tabId);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -1168,7 +1261,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'lls:batch-failed') {
     (async () => {
-      await recordBatchResult(tabId, {
+      await recordAndAdvance(tabId, {
         title: msg.title || 'lesson',
         ok: false,
         error: msg.error || 'No stream was detected.',
@@ -1217,6 +1310,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   (async () => {
+    let responded = false;
+    let advanced = false;
     try {
       const downloadVideo = msg.downloadVideo !== false;
       const downloadSubtitles = !!msg.downloadSubtitles;
@@ -1250,6 +1345,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       let subtitleFiles = [];
       let subtitleError = '';
       let videoSource = '';
+      let videoJob = null;
 
       if (downloadVideo) {
         notify(tabId, msg.requestId, 'Reading captured stream…');
@@ -1275,29 +1371,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         filename = buildFilename(msg, extension, folderMode);
-        notify(tabId, msg.requestId,
-          'Found ' + (resolution ? resolution + ' ' : '') + 'stream. Fetching ' + urls.length + ' parts…');
+        // In a batch the tab moves on as soon as the stream is identified,
+        // so progress notices would land on the wrong lesson page.
+        const say = msg.batch ? () => {} : (text) => notify(tabId, msg.requestId, text);
+        say('Found ' + (resolution ? resolution + ' ' : '') + 'stream. Fetching ' + urls.length + ' parts…');
 
-        await ensureOffscreen();
-        const assembled = await chrome.runtime.sendMessage({
-          type: 'lls:assemble',
-          requestId: msg.requestId,
-          tabId: tabId,
-          urls: urls,
-          filename: filename,
-          mime: 'video/mp2t',
-        });
-        if (!assembled || !assembled.ok) {
-          throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
+        const runVideo = async () => {
+          await ensureOffscreen();
+          const assembled = await chrome.runtime.sendMessage({
+            type: 'lls:assemble',
+            requestId: msg.batch ? null : msg.requestId,
+            tabId: msg.batch ? null : tabId,
+            urls: urls,
+            filename: filename,
+            mime: 'video/mp2t',
+          });
+          if (!assembled || !assembled.ok) {
+            throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
+          }
+          say('Starting video download…');
+          const id = await chrome.downloads.download({
+            url: assembled.blobUrl,
+            filename: filename,
+            conflictAction: 'uniquify',
+          });
+          return { downloadId: id, bytes: assembled.bytes };
+        };
+
+        if (msg.batch) {
+          // Do not wait for the video: start it, then keep going. A free slot
+          // is awaited first so at most a few videos download at once.
+          await acquireVideoSlot();
+          videoJob = runVideo().finally(releaseVideoSlot);
+          videoJob.catch(() => {}); // handled when the job is awaited below
+        } else {
+          const result = await runVideo();
+          downloadId = result.downloadId;
+          bytes = result.bytes;
         }
-
-        notify(tabId, msg.requestId, 'Starting video download…');
-        downloadId = await chrome.downloads.download({
-          url: assembled.blobUrl,
-          filename: filename,
-          conflictAction: 'uniquify',
-        });
-        bytes = assembled.bytes;
       }
 
       if (downloadSubtitles) {
@@ -1336,8 +1447,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       }
 
-      if (downloadId == null && !subtitleFiles.length) {
+      if (downloadId == null && !videoJob && !subtitleFiles.length) {
         const message = subtitleError || 'No file was saved.';
+        responded = true;
         sendResponse({
           ok: false,
           error: message,
@@ -1345,7 +1457,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           subtitleError: message,
         });
         if (msg.batch) {
-          await recordBatchResult(tabId, {
+          advanced = true;
+          await recordAndAdvance(tabId, {
             title: msg.title || 'lesson',
             ok: false,
             error: message,
@@ -1355,6 +1468,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (videoJob) {
+        // Batch: the video keeps downloading in the background while the tab
+        // moves to the next lesson. Subtitles above already finished, since
+        // they may need this page.
+        responded = true;
+        sendResponse({
+          ok: true,
+          queued: true,
+          filename: filename,
+          extension: extension,
+          ext: extension,
+          videoSource: videoSource,
+          bytes: 0,
+          resolution: resolution,
+          subtitleFiles: subtitleFiles,
+          subtitleError: subtitleError,
+        });
+
+        const finished = (async () => {
+          let jobError = '';
+          try {
+            await videoJob;
+          } catch (error) {
+            jobError = error && error.message ? error.message : String(error);
+          }
+          await recordBatchResult(tabId, {
+            title: msg.title || 'lesson',
+            ok: !jobError,
+            filename: filename,
+            subtitleFiles: subtitleFiles,
+            error: jobError || subtitleError || null,
+            order: msg.order || null,
+          });
+        })();
+        trackBatchJob(tabId, finished);
+
+        advanced = true;
+        await advanceBatch(tabId);
+        return;
+      }
+
+      responded = true;
       sendResponse({
         ok: true,
         downloadId: downloadId,
@@ -1369,7 +1524,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
 
       if (msg.batch) {
-        await recordBatchResult(tabId, {
+        advanced = true;
+        await recordAndAdvance(tabId, {
           title: msg.title || 'lesson',
           ok: true,
           filename: filename,
@@ -1380,10 +1536,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
-      sendResponse({ ok: false, error: message });
+      if (!responded) sendResponse({ ok: false, error: message });
 
-      if (msg.batch) {
-        await recordBatchResult(tabId, {
+      if (msg.batch && !advanced) {
+        await recordAndAdvance(tabId, {
           title: msg.title || 'lesson',
           ok: false,
           error: message,
