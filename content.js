@@ -457,7 +457,6 @@
     const courses = [];
     const transcripts = new Map();
     const captionTracks = [];
-    const progressive = new Map();
     const sectionSeen = new Set();
 
     for (const object of collectObjects(root)) {
@@ -468,32 +467,6 @@
         object.trackingUrn || object.star_lyndaVideoViewingStatus ||
         object.entityUrn || object.cachingKey || urn
       );
-
-      // LinkedIn embeds signed, progressive MP4 URLs in the lesson metadata.
-      // Downloading one directly gives a real .mp4 with no transcoding.
-      const play = object.presentation && object.presentation.videoPlay;
-      if (lyndaId && play) {
-        const meta = play.videoPlayMetadata || play;
-        const streams = meta.progressiveStreams || play.progressiveStreams || [];
-        for (const stream of streams) {
-          for (const location of stream.streamingLocations || []) {
-            const url = cleanText(location.url || '');
-            if (!/^https:\/\/(?:www\.)?linkedin\.com\/dms\//i.test(url)) continue;
-            const mediaType = String(stream.mediaType || location.mediaType || '');
-            if (mediaType && !/mp4/i.test(mediaType)) continue;
-            const fromUrl = (url.match(/mp4[-_]?(\d+)p/i) || [])[1];
-            const list = progressive.get(lyndaId) || [];
-            list.push({
-              url: url,
-              height: Number(stream.height || location.height || fromUrl || 0) || 0,
-              width: Number(stream.width || location.width || 0) || 0,
-              size: Number(stream.size || location.size || 0) || 0,
-              expiresAt: Number(location.expiresAt || stream.expiresAt || 0) || 0,
-            });
-            progressive.set(lyndaId, list);
-          }
-        }
-      }
 
       // LinkedIn's video metadata carries caption files with an authoritative
       // language code (locale.language) — unlike the URL, which is opaque.
@@ -568,7 +541,6 @@
       courses: courses,
       transcripts: transcripts,
       captionTracks: captionTracks,
-      progressive: progressive,
     };
   }
 
@@ -577,7 +549,7 @@
   function courseDataForCurrent() {
     if (!current) return {
       entries: [], courseTitle: '', transcriptLines: [], videoTitle: [],
-      captionTracks: [], progressiveStreams: [],
+      captionTracks: [],
     };
     const key = location.href + '|' + current.courseSlug + '|' + current.videoSlug;
     if (courseDataCache.key === key) return courseDataCache;
@@ -602,7 +574,6 @@
               videos: data.videos,
               transcripts: data.transcripts,
               captionTracks: data.captionTracks,
-              progressive: data.progressive,
               courseTitle: course.title,
             };
             break;
@@ -624,7 +595,6 @@
             videos: data.videos,
             transcripts: data.transcripts,
             captionTracks: data.captionTracks,
-            progressive: data.progressive,
             courseTitle: '',
           };
           break;
@@ -689,26 +659,6 @@
       }
     }
 
-    // Progressive MP4s are signed per lesson. Match them by the lynda id of
-    // the current video, searching every embedded root for robustness.
-    const progressiveStreams = [];
-    const seenProgressive = new Set();
-    const addStreams = (list, priority) => {
-      for (const stream of list || []) {
-        if (seenProgressive.has(stream.url)) continue;
-        seenProgressive.add(stream.url);
-        progressiveStreams.push(Object.assign({}, stream, { priority: priority }));
-      }
-    };
-    if (currentLyndaId) {
-      for (const data of parsed) {
-        addStreams((data.progressive || {}).get(currentLyndaId), 2);
-      }
-    }
-    for (const data of parsed) {
-      for (const list of (data.progressive || {}).values()) addStreams(list, 1);
-    }
-
     courseDataCache = {
       key: key,
       entries: entries,
@@ -716,7 +666,6 @@
       transcriptLines: transcriptLines,
       videoTitle: videoTitle,
       captionTracks: pageCaptionTracks,
-      progressiveStreams: progressiveStreams,
     };
     return courseDataCache;
   }
@@ -824,7 +773,6 @@
     }
     current.transcriptLines = data.transcriptLines || [];
     current.pageCaptionTracks = data.captionTracks || [];
-    current.progressiveStreams = data.progressiveStreams || [];
     const mine = collectLessons().find((lesson) => lesson.slug === current.videoSlug);
     if (mine) {
       current.section = mine.section;
@@ -1025,7 +973,6 @@
       subtitleFormat: batch.subtitleFormat || 'srt',
       transcriptLines: (current && current.transcriptLines) || [],
       pageCaptionTracks: (current && current.pageCaptionTracks) || [],
-      progressiveStreams: (current && current.progressiveStreams) || [],
     }, (resp) => {
       activeRequestId = null;
       if (!resp || !resp.ok) {
@@ -1267,7 +1214,6 @@
         identity: pageIdentity,
         transcriptLines: (current && current.transcriptLines) || [],
         pageCaptionTracks: (current && current.pageCaptionTracks) || [],
-        progressiveStreams: (current && current.progressiveStreams) || [],
       }, options);
       try {
         chrome.runtime.sendMessage(message, (resp) => {
@@ -1282,7 +1228,7 @@
             if (resp.filename) {
               parts.push('Saved ' + String(resp.ext || 'video').toUpperCase() +
                 (resp.resolution ? ' (' + resp.resolution + ')' : '') + ': ' + resp.filename +
-                (resp.videoSource && resp.ext !== 'mp4' ? ' [' + resp.videoSource + ']' : ''));
+                '');
             }
             if (resp.subtitleFiles && resp.subtitleFiles.length) {
               parts.push('Subtitles: ' + resp.subtitleFiles

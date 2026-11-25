@@ -405,48 +405,6 @@ function pickVariant(variants, wanted) {
   return pool.slice().sort((a, b) => (b.height - a.height) || (b.bandwidth - a.bandwidth))[0];
 }
 
-// HLS playlists and progressive MP4s for the same lesson share the LinkedIn
-// digitalmedia asset id in their /dms/prv/vid/ path. That is the reliable way
-// to pick the right video when a page embeds metadata for many lessons.
-function videoAssetId(url) {
-  const match = String(url || '').match(/\/dms\/prv\/vid\/(?:pl\/)?([A-Za-z0-9_-]+)\//i);
-  return match ? match[1] : '';
-}
-
-function pickProgressiveStream(streams, wanted, playlistUrls) {
-  const now = Date.now();
-  const valid = (streams || []).filter((stream) => stream &&
-    /^https:\/\/(?:www\.)?linkedin\.com\/dms\//i.test(String(stream.url || '')) &&
-    (!stream.expiresAt || Number(stream.expiresAt) > now)
-  );
-  if (!valid.length) return null;
-
-  const ids = new Set(
-    (playlistUrls || []).map(videoAssetId).filter(Boolean)
-  );
-  let candidates = valid;
-  if (ids.size) {
-    candidates = valid.filter((stream) => ids.has(videoAssetId(stream.url)));
-    if (!candidates.length) return null;
-  }
-  candidates.sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
-  const withHeight = candidates.filter((stream) => Number(stream.height) > 0);
-  const pool = withHeight.length ? withHeight : candidates;
-  const height = (stream) => Number(stream.height) || 0;
-
-  if (wanted > 0) {
-    const exact = pool.filter((stream) => height(stream) === wanted);
-    if (exact.length) return exact.sort((a, b) => Number(b.size || 0) - Number(a.size || 0))[0];
-    if (withHeight.length) {
-      return pool.slice().sort((a, b) => {
-        const delta = Math.abs(height(a) - wanted) - Math.abs(height(b) - wanted);
-        return delta || (Number(b.size || 0) - Number(a.size || 0));
-      })[0];
-    }
-  }
-  return pool.slice().sort((a, b) => height(b) - height(a))[0];
-}
-
 function derivePlaylistCandidates(segmentUrls) {
   const out = [];
   for (const raw of segmentUrls.slice(0, 6)) {
@@ -1294,81 +1252,59 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       let videoSource = '';
 
       if (downloadVideo) {
-        // Prefer LinkedIn's signed progressive MP4 from the lesson metadata.
-        // It is a genuine .mp4 — no remuxing or transcoding required. Fall
-        // back to assembling the captured HLS stream when it is unavailable
-        // or has expired.
-        const progressive = pickProgressiveStream(
-          msg.progressiveStreams, Number(msg.resolution) || 0,
-          (request.playlists || []).concat(request.segments || [])
-        );
-        if (progressive) {
-          extension = 'mp4';
-          videoSource = 'progressive';
-          resolution = progressive.height ? progressive.height + 'p' : '';
-          filename = buildFilename(msg, extension, folderMode);
-          notify(tabId, msg.requestId,
-            'Downloading ' + (resolution ? resolution + ' ' : '') + 'MP4…');
-          downloadId = await chrome.downloads.download({
-            url: progressive.url,
-            filename: filename,
-            conflictAction: 'uniquify',
-          });
-        } else {
-          notify(tabId, msg.requestId, 'Reading captured stream…');
-          chosen = await choosePlaylist(request, tabId, msg.requestId);
-          const playlist = chosen.playlist;
-          resolution = chosen.resolution || detectResolution(playlist.url);
+        notify(tabId, msg.requestId, 'Reading captured stream…');
+        chosen = await choosePlaylist(request, tabId, msg.requestId);
+        const playlist = chosen.playlist;
+        resolution = chosen.resolution || detectResolution(playlist.url);
 
-          if (playlist.encrypted) {
-            throw new Error('This lesson stream is encrypted and cannot be saved locally by this extension.');
-          }
-          if (playlist.byteRange) {
-            throw new Error('This lesson uses byte-range segments, which this extension does not support yet.');
-          }
-
-          extension = playlist.mapUri ? 'mp4' : 'ts';
-          videoSource = 'hls' + ((msg.progressiveStreams || []).length
-            ? ' (no usable progressive MP4)' : ' (none in lesson data)');
-          const mime = extension === 'mp4' ? 'video/mp4' : 'video/mp2t';
-          const urls = (playlist.mapUri ? [playlist.mapUri] : []).concat(playlist.segments);
-          if (!urls.length) {
-            throw new Error('The captured playlist contains no video segments.');
-          }
-
-          filename = buildFilename(msg, extension, folderMode);
-          notify(tabId, msg.requestId,
-            'Found ' + (resolution ? resolution + ' ' : '') + 'stream. Fetching ' + urls.length + ' parts…');
-
-          await ensureOffscreen();
-          const assembled = await chrome.runtime.sendMessage({
-            type: 'lls:assemble',
-            requestId: msg.requestId,
-            tabId: tabId,
-            urls: urls,
-            filename: filename,
-            mime: mime,
-          });
-          if (!assembled || !assembled.ok) {
-            throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
-          }
-
-          notify(tabId, msg.requestId, 'Starting video download…');
-          downloadId = await chrome.downloads.download({
-            url: assembled.blobUrl,
-            filename: filename,
-            conflictAction: 'uniquify',
-          });
-          bytes = assembled.bytes;
+        if (playlist.encrypted) {
+          throw new Error('This lesson stream is encrypted and cannot be saved locally by this extension.');
         }
+        if (playlist.byteRange) {
+          throw new Error('This lesson uses byte-range segments, which this extension does not support yet.');
+        }
+        if (playlist.mapUri) {
+          throw new Error('This lesson uses fragmented MP4 segments, which this extension does not support. Only MPEG-TS streams can be saved.');
+        }
+
+        extension = 'ts';
+        videoSource = 'hls';
+        const urls = playlist.segments;
+        if (!urls.length) {
+          throw new Error('The captured playlist contains no video segments.');
+        }
+
+        filename = buildFilename(msg, extension, folderMode);
+        notify(tabId, msg.requestId,
+          'Found ' + (resolution ? resolution + ' ' : '') + 'stream. Fetching ' + urls.length + ' parts…');
+
+        await ensureOffscreen();
+        const assembled = await chrome.runtime.sendMessage({
+          type: 'lls:assemble',
+          requestId: msg.requestId,
+          tabId: tabId,
+          urls: urls,
+          filename: filename,
+          mime: 'video/mp2t',
+        });
+        if (!assembled || !assembled.ok) {
+          throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
+        }
+
+        notify(tabId, msg.requestId, 'Starting video download…');
+        downloadId = await chrome.downloads.download({
+          url: assembled.blobUrl,
+          filename: filename,
+          conflictAction: 'uniquify',
+        });
+        bytes = assembled.bytes;
       }
 
       if (downloadSubtitles) {
         try {
-          // A progressive MP4 is already saved; probing HLS playlists again
-          // here only adds latency. Page caption metadata, captured captions
-          // and the transcript cover the subtitle sources.
-          if (!chosen && !progressive && request.playlists.length) {
+          // Reuse the playlist chosen for the video when there is one; only
+          // probe here when saving subtitles alone.
+          if (!chosen && request.playlists.length) {
             try {
               chosen = await choosePlaylist(request, tabId, msg.requestId);
             } catch (_) {

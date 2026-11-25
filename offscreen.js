@@ -30,10 +30,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
 
-    const buffers = new Array(urls.length);
+    // Segments are small, so latency (not bandwidth) is the bottleneck.
+    // Many parallel requests keep the connection saturated.
+    const CONCURRENCY = 16;
+    const MAX_RETRIES = 3;
+    const SEGMENT_TIMEOUT_MS = 30000;
+
+    const parts = new Array(urls.length);
     let next = 0;
     let done = 0;
+    let loadedBytes = 0;
     let failure = null;
+    let lastReport = 0;
 
     function report(message, state) {
       try {
@@ -50,28 +58,67 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
 
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function fetchPart(url) {
+      let lastError = null;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), SEGMENT_TIMEOUT_MS);
+        try {
+          const response = await fetch(url, {
+            credentials: 'include',
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            const error = new Error('HTTP ' + response.status);
+            error.status = response.status;
+            // Expired/forbidden links will not recover by retrying.
+            if (response.status === 401 || response.status === 403 || response.status === 404) {
+              error.fatal = true;
+            }
+            throw error;
+          }
+          // Blob lets the browser keep data off the JS heap.
+          return await response.blob();
+        } catch (error) {
+          lastError = error;
+          if (error.fatal) break;
+          if (attempt < MAX_RETRIES) await sleep(300 * Math.pow(2, attempt));
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      throw lastError || new Error('Segment download failed');
+    }
+
     async function worker() {
       while (!failure) {
         const index = next++;
         if (index >= urls.length) return;
         try {
-          const response = await fetch(urls[index], { credentials: 'include', cache: 'no-store' });
-          if (!response.ok) throw new Error('HTTP ' + response.status);
-          buffers[index] = await response.arrayBuffer();
+          const part = await fetchPart(urls[index]);
+          parts[index] = part;
+          loadedBytes += part.size;
         } catch (error) {
           failure = error;
           return;
         }
         done++;
-        if (done % 10 === 0 || done === urls.length) {
-          report('Downloading stream (' + done + '/' + urls.length + ')…');
+        const now = Date.now();
+        if (done === urls.length || now - lastReport > 500) {
+          lastReport = now;
+          const mb = (loadedBytes / 1048576).toFixed(1);
+          report('Downloading stream (' + done + '/' + urls.length + ', ' + mb + ' MB)…');
         }
       }
     }
 
     try {
       const workers = [];
-      const count = Math.min(4, urls.length);
+      const count = Math.min(CONCURRENCY, urls.length);
       for (let i = 0; i < count; i++) workers.push(worker());
       await Promise.all(workers);
 
@@ -80,13 +127,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         throw new Error('Stream download failed.' + status + ' Reload the lesson page and retry.');
       }
 
-      const blob = new Blob(buffers, { type: msg.mime || 'application/octet-stream' });
+      const blob = new Blob(parts, { type: msg.mime || 'application/octet-stream' });
       const blobUrl = URL.createObjectURL(blob);
 
       // Keep the blob alive long enough for the download manager to read it.
       setTimeout(() => {
         try { URL.revokeObjectURL(blobUrl); } catch (_) { /* already gone */ }
-      }, 60000);
+      }, 600000);
 
       sendResponse({ ok: true, blobUrl: blobUrl, bytes: blob.size });
     } catch (error) {
