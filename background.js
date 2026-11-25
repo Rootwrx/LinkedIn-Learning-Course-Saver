@@ -325,6 +325,8 @@ function parsePlaylist(text, url) {
     url: url,
     variants: [],
     segments: [],
+    segmentMaps: [], // fMP4 header (EXT-X-MAP) that applies to each segment
+    audios: [], // separate audio renditions of a master playlist
     subtitles: [],
     mapUri: '',
     encrypted: false,
@@ -341,11 +343,20 @@ function parsePlaylist(text, url) {
         bandwidth: Number(attrs.BANDWIDTH || attrs.AVERAGE_BANDWIDTH || 0),
         width: Number(size[0]) || 0,
         height: Number(size[1]) || 0,
+        audio: attrs.AUDIO || '',
       };
       continue;
     }
-    if (line.startsWith('#EXT-X-MEDIA')) {
+    // The colon keeps this from matching #EXT-X-MEDIA-SEQUENCE.
+    if (line.startsWith('#EXT-X-MEDIA:')) {
       const attrs = parseAttrs(line.slice(line.indexOf(':') + 1));
+      if (String(attrs.TYPE || '').toUpperCase() === 'AUDIO' && attrs.URI) {
+        result.audios.push({
+          group: attrs['GROUP-ID'] || '',
+          isDefault: String(attrs.DEFAULT || '').toUpperCase() === 'YES',
+          url: resolveUrl(attrs.URI, url),
+        });
+      }
       if (String(attrs.TYPE || '').toUpperCase() === 'SUBTITLES' && attrs.URI) {
         const info = languageInfo(attrs.LANGUAGE || attrs.NAME || '') || languageFromUrl(attrs.URI);
         result.subtitles.push({
@@ -360,6 +371,7 @@ function parsePlaylist(text, url) {
     if (line.startsWith('#EXT-X-MAP')) {
       const attrs = parseAttrs(line.slice(line.indexOf(':') + 1));
       if (attrs.URI) result.mapUri = resolveUrl(attrs.URI, url);
+      if (attrs.BYTERANGE) result.byteRange = true;
       continue;
     }
     if (line.startsWith('#EXT-X-KEY')) {
@@ -379,6 +391,7 @@ function parsePlaylist(text, url) {
       pendingVariant = null;
     } else {
       result.segments.push(resolveUrl(line, url));
+      result.segmentMaps.push(result.mapUri);
     }
   }
 
@@ -511,6 +524,7 @@ async function choosePlaylist(msg, tabId, requestId) {
   let master = null;
   let media = null;
   let subtitles = [];
+  const mediaLists = [];
   let lastError = null;
   let sawExpired = false;
 
@@ -535,8 +549,9 @@ async function choosePlaylist(msg, tabId, requestId) {
     }
     if (playlist.isMaster) {
       if (!master) master = playlist;
-    } else if (!media && playlist.segments.length) {
-      media = playlist;
+    } else if (playlist.segments.length) {
+      mediaLists.push(playlist);
+      if (!media) media = playlist;
     }
   }
 
@@ -550,8 +565,12 @@ async function choosePlaylist(msg, tabId, requestId) {
         if (playlist.subtitles && playlist.subtitles.length) {
           subtitles = subtitles.concat(playlist.subtitles);
         }
+        const audios = master.audios.filter((item) => item.group === variant.audio);
+        const audio = audios.find((item) => item.isDefault) || audios[0];
         return {
           playlist: playlist,
+          audioUrl: audio ? audio.url : '',
+          others: mediaLists,
           resolution: variant.height ? variant.height + 'p' : detectResolution(variant.url),
           subtitles: dedupeSubtitleTracks(subtitles),
         };
@@ -562,6 +581,7 @@ async function choosePlaylist(msg, tabId, requestId) {
         if (media) {
           return {
             playlist: media,
+            others: mediaLists,
             resolution: detectResolution(media.url),
             subtitles: dedupeSubtitleTracks(subtitles),
           };
@@ -573,6 +593,7 @@ async function choosePlaylist(msg, tabId, requestId) {
   if (media) {
     return {
       playlist: media,
+      others: mediaLists,
       resolution: detectResolution(media.url),
       subtitles: dedupeSubtitleTracks(subtitles),
     };
@@ -583,6 +604,97 @@ async function choosePlaylist(msg, tabId, requestId) {
   }
   throw new Error('Could not open the captured playlist' +
     (lastError ? ' (' + lastError.message + ')' : '') + '. Reload the lesson page and let the video start again.');
+}
+
+// Which kinds of track does an fMP4 header describe? Reads the handler boxes.
+async function initTracks(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url, { credentials: 'include', signal: controller.signal });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let text = '';
+    for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+    return {
+      video: /hdlr[\s\S]{8}vide/.test(text),
+      audio: /hdlr[\s\S]{8}soun/.test(text),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function checkPlaylist(playlist) {
+  if (playlist.encrypted) {
+    throw new Error('This lesson stream is encrypted and cannot be saved locally by this extension.');
+  }
+  if (playlist.byteRange) {
+    throw new Error('This lesson uses byte-range segments, which this extension does not support yet.');
+  }
+  if (!playlist.segments.length) {
+    throw new Error('The captured playlist contains no video segments.');
+  }
+}
+
+// List what to download for an fMP4 lesson: the video playlist and, when the
+// sound is stored separately, the audio playlist.
+async function fragmentStreams(chosen) {
+  let video = chosen.playlist;
+  let audio = null;
+  let tracks = await initTracks(video.mapUri);
+  const others = (chosen.others || []).filter((item) => item.mapUri && item.url !== video.url);
+
+  // Without a master playlist the captured one may be the audio playlist.
+  if (!tracks.video) {
+    const found = [];
+    for (const item of others) {
+      const kinds = await initTracks(item.mapUri);
+      if (kinds.video) found.push({ item: item, kinds: kinds });
+    }
+    if (!found.length) {
+      throw new Error('Only the audio stream was captured. Reload the lesson page and retry.');
+    }
+    found.sort((a, b) => (parseInt(detectResolution(b.item.url), 10) || 0) -
+      (parseInt(detectResolution(a.item.url), 10) || 0));
+    if (tracks.audio) audio = video;
+    video = found[0].item;
+    tracks = found[0].kinds;
+  }
+
+  if (tracks.audio) {
+    audio = null; // sound is already inside the video stream
+  } else if (chosen.audioUrl) {
+    audio = parsePlaylist(await fetchText(chosen.audioUrl), chosen.audioUrl);
+  } else if (!audio) {
+    for (const item of others) {
+      const kinds = await initTracks(item.mapUri);
+      if (kinds.audio && !kinds.video) {
+        audio = item;
+        break;
+      }
+    }
+  }
+  if (!tracks.audio && !audio) {
+    throw new Error('The audio stream was not found. Reload the lesson page, play the video and retry.');
+  }
+
+  return (audio ? [video, audio] : [video]).map((playlist) => {
+    checkPlaylist(playlist);
+    if (playlist.segmentMaps.some((map) => !map)) {
+      throw new Error('A stream part has no fMP4 header.');
+    }
+    const items = [];
+    let map = '';
+    playlist.segments.forEach((url, index) => {
+      if (playlist.segmentMaps[index] !== map) {
+        map = playlist.segmentMaps[index];
+        items.push({ url: map, init: true });
+      }
+      items.push({ url: url, init: false });
+    });
+    return items;
+  });
 }
 
 function findTranscriptLines(value) {
@@ -1353,22 +1465,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const playlist = chosen.playlist;
         resolution = chosen.resolution || detectResolution(playlist.url);
 
-        if (playlist.encrypted) {
-          throw new Error('This lesson stream is encrypted and cannot be saved locally by this extension.');
-        }
-        if (playlist.byteRange) {
-          throw new Error('This lesson uses byte-range segments, which this extension does not support yet.');
-        }
-        if (playlist.mapUri) {
-          throw new Error('This lesson uses fragmented MP4 segments, which this extension does not support. Only MPEG-TS streams can be saved.');
-        }
+        checkPlaylist(playlist);
 
         extension = 'mp4';
         videoSource = 'hls';
-        const urls = playlist.segments;
-        if (!urls.length) {
-          throw new Error('The captured playlist contains no video segments.');
-        }
+        const streams = playlist.mapUri ? await fragmentStreams(chosen) : null;
+        const urls = streams ? [].concat(...streams) : playlist.segments;
 
         filename = buildFilename(msg, extension, folderMode);
         // In a batch the tab moves on as soon as the stream is identified,
@@ -1382,7 +1484,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             type: 'lls:assemble',
             requestId: msg.batch ? null : msg.requestId,
             tabId: msg.batch ? null : tabId,
-            urls: urls,
+            urls: streams ? undefined : urls,
+            streams: streams || undefined,
             filename: filename,
           });
           if (!assembled || !assembled.ok) {

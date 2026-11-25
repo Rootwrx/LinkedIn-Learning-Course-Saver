@@ -1,6 +1,7 @@
 'use strict';
 
-// MPEG-TS (H.264 + AAC) -> MP4 remuxer. No re-encoding, no dependencies.
+// HLS stream -> MP4 remuxer for MPEG-TS (H.264 + AAC) and fragmented MP4.
+// No re-encoding, no dependencies.
 //
 // Why a plain rename or concat does not work:
 //  - TS timestamps use a 90 kHz clock, start at an arbitrary value, wrap at 2^33
@@ -270,8 +271,7 @@
     edits.push(u32(shown), u32(track.mediaStart), u32(0x10000));
     const total = toMovie(track.delay) + shown;
 
-    const stbl = [fullBox('stsd', 0, 0, u32(1),
-      isVideo ? videoEntry(track) : audioEntry(track))];
+    const stbl = [track.stsd()];
     const stts = runLength(track.durations);
     stbl.push(fullBox('stts', 0, 0, u32(stts.length / 2), table(stts)));
     if (isVideo) {
@@ -286,8 +286,10 @@
     }
     const stsc = [];
     track.chunks.forEach((chunk, i) => {
-      if (!stsc.length || stsc[stsc.length - 2] !== chunk.samples) {
-        stsc.push(i + 1, chunk.samples, 1);
+      const description = chunk.description || 1;
+      if (!stsc.length || stsc[stsc.length - 2] !== chunk.samples ||
+          stsc[stsc.length - 1] !== description) {
+        stsc.push(i + 1, chunk.samples, description);
       }
     });
     stbl.push(fullBox('stsc', 0, 0, u32(stsc.length / 3), table(stsc)));
@@ -296,20 +298,25 @@
       ? fullBox('co64', 0, 0, u32(chunkOffsets.length), concat(chunkOffsets.map(u64)))
       : fullBox('stco', 0, 0, u32(chunkOffsets.length), table(chunkOffsets)));
 
-    const width = isVideo
-      ? Math.round(track.info.width * track.info.sar[0] / track.info.sar[1]) : 0;
-    const height = isVideo ? track.info.height : 0;
+    // Display size as 16.16 fixed point.
+    const width = isVideo ? track.width : 0;
+    const height = isVideo ? track.height : 0;
+    // Fine timescales need the 64-bit form of the media header.
+    const mdhd = track.duration > 0xffffffff
+      ? fullBox('mdhd', 1, 0, u64(0), u64(0), u32(track.timescale), u64(track.duration),
+        u16(0x55c4), u16(0))
+      : fullBox('mdhd', 0, 0, u32(0), u32(0), u32(track.timescale), u32(track.duration),
+        u16(0x55c4), u16(0));
 
     return {
       duration: total,
       data: box('trak',
         fullBox('tkhd', 0, 7, u32(0), u32(0), u32(id), u32(0), u32(total), zeros(8),
           u16(0), u16(isVideo ? 0 : 1), u16(isVideo ? 0 : 0x100), u16(0), MATRIX,
-          u32(width * 65536), u32(height * 65536)),
+          u32(width), u32(height)),
         box('edts', fullBox('elst', 0, 0, u32(edits.length / 3), ...edits)),
         box('mdia',
-          fullBox('mdhd', 0, 0, u32(0), u32(0), u32(track.timescale), u32(track.duration),
-            u16(0x55c4), u16(0)),
+          mdhd,
           fullBox('hdlr', 0, 0, u32(0), ascii(isVideo ? 'vide' : 'soun'), zeros(12),
             ascii(isVideo ? 'VideoHandler\0' : 'SoundHandler\0')),
           box('minf',
@@ -675,6 +682,11 @@
       video.shownEnd = lastShown + videoStep - base;
       video.delay = 0;
 
+      video.width = Math.round(video.info.width * video.info.sar[0] / video.info.sar[1]) * 65536;
+      video.height = video.info.height * 65536;
+      video.stsd = () => fullBox('stsd', 0, 0, u32(1), videoEntry(video));
+      audio.stsd = () => fullBox('stsd', 0, 0, u32(1), audioEntry(audio));
+
       const tracks = [video];
       if (audio.sizes.length) {
         const lead = audioStart - Math.max(firstShown, base);
@@ -685,39 +697,8 @@
         tracks.push(audio);
       }
 
-      let mediaBytes = 0;
-      const positions = new Array(mediaChunks.length);
-      for (const track of tracks) {
-        for (const chunk of track.chunks) positions[chunk.index] = chunk.bytes;
-      }
-      for (let i = 0; i < positions.length; i++) {
-        const size = positions[i];
-        positions[i] = mediaBytes;
-        mediaBytes += size;
-      }
-
-      const useCo64 = mediaBytes > 4000000000;
-      const ftyp = box('ftyp', ascii('isom'), u32(512), ascii('isomiso2avc1mp41'));
-      const mdatHeader = useCo64
-        ? concat([u32(1), ascii('mdat'), u64(mediaBytes + 16)])
-        : concat([u32(mediaBytes + 8), ascii('mdat')]);
-
-      function buildMoov(dataStart) {
-        const built = tracks.map((track, i) => trackBox(track, i + 1,
-          track.chunks.map((chunk) => dataStart + positions[chunk.index]), useCo64));
-        const duration = Math.max(...built.map((item) => item.duration));
-        return box('moov',
-          fullBox('mvhd', 0, 0, u32(0), u32(0), u32(MOVIE_SCALE), u32(duration),
-            u32(0x10000), u16(0x100), zeros(10), MATRIX, zeros(24), u32(tracks.length + 1)),
-          ...built.map((item) => item.data));
-      }
-
-      // moov goes first (fast start); its size does not depend on the offsets.
-      const size = buildMoov(0).length;
-      const moov = buildMoov(ftyp.length + size + mdatHeader.length);
-
       return {
-        blob: new Blob([ftyp, moov, mdatHeader, ...mediaChunks], { type: 'video/mp4' }),
+        blob: writeMovie(tracks, mediaChunks),
         info: {
           width: video.info.width,
           height: video.info.height,
@@ -731,5 +712,355 @@
     return { push: push, finish: finish };
   }
 
-  global.LLSRemux = { createRemuxer: createRemuxer };
+  /* ------------------------------ Movie file ------------------------- */
+
+  // Build a regular (non-fragmented) MP4 with the index first.
+  function writeMovie(tracks, mediaChunks) {
+    let mediaBytes = 0;
+    const positions = new Array(mediaChunks.length);
+    for (const track of tracks) {
+      for (const chunk of track.chunks) positions[chunk.index] = chunk.bytes;
+    }
+    for (let i = 0; i < positions.length; i++) {
+      const size = positions[i];
+      positions[i] = mediaBytes;
+      mediaBytes += size;
+    }
+
+    const useCo64 = mediaBytes > 4000000000;
+    const ftyp = box('ftyp', ascii('isom'), u32(512), ascii('isomiso2mp41'));
+    const mdatHeader = useCo64
+      ? concat([u32(1), ascii('mdat'), u64(mediaBytes + 16)])
+      : concat([u32(mediaBytes + 8), ascii('mdat')]);
+
+    function buildMoov(dataStart) {
+      const built = tracks.map((track, i) => trackBox(track, i + 1,
+        track.chunks.map((chunk) => dataStart + positions[chunk.index]), useCo64));
+      const duration = Math.max(...built.map((item) => item.duration));
+      return box('moov',
+        fullBox('mvhd', 0, 0, u32(0), u32(0), u32(MOVIE_SCALE), u32(duration),
+          u32(0x10000), u16(0x100), zeros(10), MATRIX, zeros(24), u32(tracks.length + 1)),
+        ...built.map((item) => item.data));
+    }
+
+    // The size of moov does not depend on the offsets.
+    const size = buildMoov(0).length;
+    const moov = buildMoov(ftyp.length + size + mdatHeader.length);
+    return new Blob([ftyp, moov, mdatHeader, ...mediaChunks], { type: 'video/mp4' });
+  }
+
+  /* ------------------------------ Fragmented MP4 input --------------- */
+
+  function read32(d, i) {
+    return d[i] * 16777216 + d[i + 1] * 65536 + d[i + 2] * 256 + d[i + 3];
+  }
+  function readSigned32(d, i) { return read32(d, i) | 0; }
+  function read64(d, i) { return read32(d, i) * 4294967296 + read32(d, i + 4); }
+  function typeAt(d, i) { return String.fromCharCode(d[i], d[i + 1], d[i + 2], d[i + 3]); }
+
+  // List the boxes stored between `from` and `to`.
+  function boxes(d, from, to) {
+    const out = [];
+    let i = from;
+    while (i + 8 <= to) {
+      let size = read32(d, i);
+      let header = 8;
+      if (size === 1) {
+        size = read64(d, i + 8);
+        header = 16;
+      } else if (size === 0) {
+        size = to - i;
+      }
+      if (size < header || i + size > to) throw new Error('A stream part is damaged or incomplete.');
+      out.push({ type: typeAt(d, i + 4), start: i, body: i + header, end: i + size });
+      i += size;
+    }
+    return out;
+  }
+
+  function child(d, parent, ...path) {
+    let node = parent;
+    for (const type of path) {
+      node = node && boxes(d, node.body, node.end).find((item) => item.type === type);
+    }
+    return node || null;
+  }
+
+  function parseInit(d) {
+    const moov = boxes(d, 0, d.length).find((item) => item.type === 'moov');
+    if (!moov) throw new Error('The stream header (moov) is missing.');
+    const inner = boxes(d, moov.body, moov.end);
+    const defaults = new Map();
+    const mvex = inner.find((item) => item.type === 'mvex');
+    if (mvex) {
+      for (const trex of boxes(d, mvex.body, mvex.end)) {
+        if (trex.type !== 'trex') continue;
+        const b = trex.body;
+        defaults.set(read32(d, b + 4), {
+          description: read32(d, b + 8), duration: read32(d, b + 12),
+          size: read32(d, b + 16), flags: read32(d, b + 20),
+        });
+      }
+    }
+    const movieHeader = inner.find((item) => item.type === 'mvhd');
+    const movieScale = movieHeader
+      ? read32(d, movieHeader.body + (d[movieHeader.body] === 1 ? 20 : 12)) : 0;
+
+    const tracks = [];
+    for (const trak of inner) {
+      if (trak.type !== 'trak') continue;
+      const tkhd = child(d, trak, 'tkhd');
+      const mdhd = child(d, trak, 'mdia', 'mdhd');
+      const hdlr = child(d, trak, 'mdia', 'hdlr');
+      const stsd = child(d, trak, 'mdia', 'minf', 'stbl', 'stsd');
+      if (!tkhd || !mdhd || !hdlr || !stsd) continue;
+      const handler = typeAt(d, hdlr.body + 8);
+      const kind = handler === 'vide' ? 'video' : handler === 'soun' ? 'audio' : '';
+      if (!kind) continue;
+      for (const entry of boxes(d, stsd.body + 8, stsd.end)) {
+        if (entry.type === 'encv' || entry.type === 'enca') {
+          throw new Error('This lesson stream is encrypted and cannot be saved.');
+        }
+      }
+      const id = read32(d, tkhd.body + (d[tkhd.body] === 1 ? 20 : 12));
+      const timescale = read32(d, mdhd.body + (d[mdhd.body] === 1 ? 20 : 12));
+      if (!timescale) throw new Error('The stream header has no timescale.');
+
+      // An edit list shifts the track: needed to keep audio and video in sync.
+      let shift = 0;
+      const elst = child(d, trak, 'edts', 'elst');
+      if (elst) {
+        const wide = d[elst.body] === 1;
+        let at = elst.body + 8;
+        for (let n = read32(d, elst.body + 4); n > 0; n--) {
+          const length = wide ? read64(d, at) : read32(d, at);
+          const media = wide ? read64(d, at + 8) : readSigned32(d, at + 4);
+          const empty = wide ? read32(d, at + 8) === 0xffffffff : media === -1;
+          if (empty) {
+            if (movieScale) shift -= Math.round(length * timescale / movieScale);
+          } else {
+            shift += media;
+            break;
+          }
+          at += wide ? 20 : 12;
+        }
+      }
+      tracks.push({
+        id: id,
+        kind: kind,
+        timescale: timescale,
+        shift: shift,
+        stsd: d.slice(stsd.start, stsd.end),
+        width: read32(d, tkhd.end - 8),
+        height: read32(d, tkhd.end - 4),
+        defaults: defaults.get(id) || { description: 1, duration: 0, size: 0, flags: 0 },
+      });
+    }
+    return tracks;
+  }
+
+  // Return the samples of one media segment, grouped by track ID.
+  function parseFragments(d, init) {
+    const out = new Map();
+    for (const moof of boxes(d, 0, d.length)) {
+      if (moof.type !== 'moof') continue;
+      let previousEnd = moof.start;
+      for (const traf of boxes(d, moof.body, moof.end)) {
+        if (traf.type !== 'traf') continue;
+        const parts = boxes(d, traf.body, traf.end);
+        const tfhd = parts.find((item) => item.type === 'tfhd');
+        if (!tfhd) continue;
+        const flags = read32(d, tfhd.body) & 0xffffff;
+        const id = read32(d, tfhd.body + 4);
+        const track = init.find((item) => item.id === id);
+        const defaults = Object.assign(
+          { description: 1, duration: 0, size: 0, flags: 0 }, track && track.defaults);
+        let at = tfhd.body + 8;
+        let base = flags & 0x020000 ? moof.start : previousEnd;
+        if (flags & 0x01) { base = read64(d, at); at += 8; }
+        if (flags & 0x02) { defaults.description = read32(d, at); at += 4; }
+        if (flags & 0x08) { defaults.duration = read32(d, at); at += 4; }
+        if (flags & 0x10) { defaults.size = read32(d, at); at += 4; }
+        if (flags & 0x20) { defaults.flags = read32(d, at); at += 4; }
+
+        const tfdt = parts.find((item) => item.type === 'tfdt');
+        let time = null;
+        if (tfdt) {
+          time = d[tfdt.body] === 1 ? read64(d, tfdt.body + 4) : read32(d, tfdt.body + 4);
+        }
+
+        let position = base;
+        const samples = [];
+        for (const trun of parts) {
+          if (trun.type !== 'trun') continue;
+          const has = read32(d, trun.body) & 0xffffff;
+          const count = read32(d, trun.body + 4);
+          let p = trun.body + 8;
+          if (has & 0x01) { position = base + readSigned32(d, p); p += 4; }
+          let firstFlags = null;
+          if (has & 0x04) { firstFlags = read32(d, p); p += 4; }
+          for (let i = 0; i < count; i++) {
+            let duration = defaults.duration;
+            let size = defaults.size;
+            let sampleFlags = i === 0 && firstFlags != null ? firstFlags : defaults.flags;
+            let offset = 0;
+            if (has & 0x100) { duration = read32(d, p); p += 4; }
+            if (has & 0x200) { size = read32(d, p); p += 4; }
+            if (has & 0x400) { sampleFlags = read32(d, p); p += 4; }
+            // Read as signed: version 0 files sometimes store negatives too.
+            if (has & 0x800) { offset = readSigned32(d, p); p += 4; }
+            if (p > trun.end || position < 0 || position + size > d.length) {
+              throw new Error('A stream part is damaged or incomplete.');
+            }
+            samples.push({
+              data: d.subarray(position, position + size),
+              duration: duration,
+              offset: offset,
+              key: !(sampleFlags & 0x10000),
+              description: defaults.description,
+            });
+            position += size;
+          }
+        }
+        previousEnd = position;
+        if (!out.has(id)) out.set(id, []);
+        out.get(id).push({ time: time, samples: samples });
+      }
+    }
+    return out;
+  }
+
+  // Fragmented MP4 input. Audio and video may come in one stream or in two
+  // separate ones (`stream` is any number identifying the playlist).
+  function createFragmentRemuxer() {
+    const inits = new Map();
+    const chosen = { video: null, audio: null };
+    const mediaChunks = [];
+
+    function addInit(stream, data) {
+      const tracks = parseInit(data);
+      inits.set(stream, tracks);
+      for (const info of tracks) {
+        const current = chosen[info.kind];
+        if (!current) {
+          chosen[info.kind] = {
+            stream: stream, id: info.id, kind: info.kind, timescale: info.timescale,
+            shift: info.shift, stsdBytes: info.stsd, width: info.width, height: info.height,
+            sizes: [], durations: [], offsets: [], keys: [], chunks: [],
+            next: null, correction: 0,
+          };
+        } else if (current.stream === stream && current.id === info.id &&
+            (current.timescale !== info.timescale || !sameBytes(current.stsdBytes, info.stsd))) {
+          throw new Error('The stream format changes in the middle of the lesson.');
+        }
+      }
+    }
+
+    function addSegment(stream, data) {
+      const init = inits.get(stream);
+      if (!init) throw new Error('The stream header is missing.');
+      const fragments = parseFragments(data, init);
+      if (!fragments.size) throw new Error('A stream part is not fragmented MP4 data.');
+      for (const track of [chosen.video, chosen.audio]) {
+        if (!track || track.stream !== stream) continue;
+        const pieces = [];
+        let bytes = 0;
+        let count = 0;
+        let description = 1;
+        const flush = () => {
+          if (!count) return;
+          track.chunks.push({
+            index: mediaChunks.length, samples: count, bytes: bytes, description: description,
+          });
+          mediaChunks.push(new Blob(pieces.splice(0)));
+          bytes = 0;
+          count = 0;
+        };
+        for (const fragment of fragments.get(track.id) || []) {
+          if (!fragment.samples.length) continue;
+          // Place the fragment on a continuous timeline: restarts and jumps in
+          // the source decode times are closed up.
+          let time = fragment.time != null ? fragment.time + track.correction : track.next || 0;
+          if (track.next == null) {
+            track.first = time;
+            track.start = time;
+          } else {
+            const delta = (time - track.next) / track.timescale;
+            if (delta < -MAX_BACKWARD / CLOCK || delta > MAX_FORWARD / CLOCK) {
+              track.correction += track.next - time;
+              time = track.next;
+            }
+            // MP4 expresses time as the length of the previous sample.
+            const last = track.durations.length - 1;
+            const length = Math.max(1, track.durations[last] + time - track.next);
+            time = track.next + length - track.durations[last];
+            track.durations[last] = length;
+          }
+          for (const sample of fragment.samples) {
+            if (sample.description !== description) flush();
+            description = sample.description;
+            const decode = time - track.start;
+            const shown = decode + sample.offset;
+            if (track.shownFirst == null || shown < track.shownFirst) track.shownFirst = shown;
+            if (track.shownLast == null || shown + sample.duration > track.shownLast) {
+              track.shownLast = shown + sample.duration;
+            }
+            track.sizes.push(sample.data.length);
+            track.durations.push(sample.duration);
+            track.offsets.push(sample.offset);
+            if (sample.key) track.keys.push(track.sizes.length);
+            pieces.push(sample.data.slice());
+            bytes += sample.data.length;
+            count++;
+            time += sample.duration;
+          }
+          track.next = time;
+        }
+        flush();
+      }
+    }
+
+    function finish() {
+      const video = chosen.video;
+      const audio = chosen.audio;
+      if (!video || !video.sizes.length) throw new Error('No video was found in this stream.');
+      if (!audio || !audio.sizes.length) throw new Error('No audio was found for this lesson.');
+
+      const tracks = [video, audio];
+      for (const track of tracks) {
+        track.duration = track.durations.reduce((sum, value) => sum + value, 0);
+        track.shownEnd = track.shownLast;
+        // Time of the first presented sample on the source clock, in seconds.
+        track.origin = (track.first + track.shownFirst - track.shift) / track.timescale;
+        track.mediaStart = Math.max(0, track.shownFirst);
+        track.delay = 0;
+        track.stsd = () => track.stsdBytes;
+      }
+      // Keep the source's audio/video offset. A very large difference means the
+      // two playlists use unrelated clocks, so start them together.
+      const lead = audio.origin - video.origin;
+      if (Math.abs(lead) < 10) {
+        const ticks = Math.round(lead * audio.timescale);
+        if (ticks > 0) audio.delay = ticks;
+        else audio.mediaStart -= ticks;
+      }
+      return {
+        blob: writeMovie(tracks, mediaChunks),
+        info: {
+          width: Math.round(video.width / 65536),
+          height: Math.round(video.height / 65536),
+          frames: video.sizes.length,
+          audioFrames: audio.sizes.length,
+          seconds: video.duration / video.timescale,
+        },
+      };
+    }
+
+    return { addInit: addInit, addSegment: addSegment, finish: finish };
+  }
+
+  global.LLSRemux = {
+    createRemuxer: createRemuxer,
+    createFragmentRemuxer: createFragmentRemuxer,
+  };
 })(globalThis);

@@ -24,7 +24,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
 
-    const urls = Array.isArray(msg.urls) ? msg.urls : [];
+    // Fragmented MP4 arrives as one list per playlist (video, then audio if
+    // separate); each entry is {url, init}. MPEG-TS arrives as a URL list.
+    const streams = Array.isArray(msg.streams) ? msg.streams : null;
+    const urls = streams
+      ? [].concat(...streams).map((item) => item.url)
+      : (Array.isArray(msg.urls) ? msg.urls : []);
     if (!urls.length) {
       sendResponse({ ok: false, error: 'No stream parts were provided.' });
       return;
@@ -97,15 +102,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Repackage the MPEG-TS segments as one MP4. One segment is read at a time
     // and released afterwards to keep memory use low.
     async function toMp4(segments) {
-      const remuxer = LLSRemux.createRemuxer();
       try {
-        for (let i = 0; i < segments.length; i++) {
-          remuxer.push(new Uint8Array(await segments[i].arrayBuffer()));
-          segments[i] = null;
+        const remuxer = streams
+          ? LLSRemux.createFragmentRemuxer() : LLSRemux.createRemuxer();
+        const jobs = [];
+        if (streams) {
+          // Alternate between the playlists so audio and video are interleaved.
+          let base = 0;
+          streams.forEach((items, stream) => {
+            items.forEach((item, position) => {
+              jobs.push({ part: base + position, position, stream, init: item.init });
+            });
+            base += items.length;
+          });
+          jobs.sort((a, b) => (a.position - b.position) || (a.stream - b.stream));
+        } else {
+          segments.forEach((_, part) => jobs.push({ part }));
+        }
+        for (let i = 0; i < jobs.length; i++) {
+          const job = jobs[i];
+          const data = new Uint8Array(await segments[job.part].arrayBuffer());
+          segments[job.part] = null;
+          if (!streams) remuxer.push(data);
+          else if (job.init) remuxer.addInit(job.stream, data);
+          else remuxer.addSegment(job.stream, data);
           const now = Date.now();
-          if (i + 1 === segments.length || now - lastReport > 500) {
+          if (i + 1 === jobs.length || now - lastReport > 500) {
             lastReport = now;
-            report('Converting to MP4 (' + (i + 1) + '/' + segments.length + ')…');
+            report('Converting to MP4 (' + (i + 1) + '/' + jobs.length + ')…');
           }
         }
         return remuxer.finish().blob;
