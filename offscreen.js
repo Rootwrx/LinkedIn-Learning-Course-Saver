@@ -94,6 +94,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       throw lastError || new Error('Segment download failed');
     }
 
+    // Repackage the MPEG-TS segments as one MP4. One segment is read at a time
+    // and released afterwards to keep memory use low.
+    async function toMp4(segments) {
+      const remuxer = LLSRemux.createRemuxer();
+      try {
+        for (let i = 0; i < segments.length; i++) {
+          remuxer.push(new Uint8Array(await segments[i].arrayBuffer()));
+          segments[i] = null;
+          const now = Date.now();
+          if (i + 1 === segments.length || now - lastReport > 500) {
+            lastReport = now;
+            report('Converting to MP4 (' + (i + 1) + '/' + segments.length + ')…');
+          }
+        }
+        return remuxer.finish().blob;
+      } catch (error) {
+        throw new Error('MP4 conversion failed: ' +
+          (error && error.message ? error.message : String(error)));
+      }
+    }
+
     async function worker() {
       while (!failure) {
         const index = next++;
@@ -127,7 +148,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         throw new Error('Stream download failed.' + status + ' Reload the lesson page and retry.');
       }
 
-      const blob = new Blob(parts, { type: msg.mime || 'application/octet-stream' });
+      const blob = await toMp4(parts);
       const blobUrl = URL.createObjectURL(blob);
 
       // Keep the blob alive long enough for the download manager to read it.

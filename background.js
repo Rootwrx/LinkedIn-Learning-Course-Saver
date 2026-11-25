@@ -1363,7 +1363,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           throw new Error('This lesson uses fragmented MP4 segments, which this extension does not support. Only MPEG-TS streams can be saved.');
         }
 
-        extension = 'ts';
+        extension = 'mp4';
         videoSource = 'hls';
         const urls = playlist.segments;
         if (!urls.length) {
@@ -1384,7 +1384,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             tabId: msg.batch ? null : tabId,
             urls: urls,
             filename: filename,
-            mime: 'video/mp2t',
           });
           if (!assembled || !assembled.ok) {
             throw new Error((assembled && assembled.error) || 'Could not assemble the video file.');
